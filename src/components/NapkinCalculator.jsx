@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { db } from '../db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { jsPDF } from "jspdf";
@@ -39,12 +39,17 @@ const NapkinCalculator = () => {
   const [showHistory, setShowHistory] = useState(false);
   const [images, setImages] = useState([]); 
   const [isCompressing, setIsCompressing] = useState(false);
+  
+  // Install & Modal State
   const [installPrompt, setInstallPrompt] = useState(null);
   const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackText, setFeedbackText] = useState('');
+  
+  // Hidden input for restore
+  const fileInputRef = useRef(null);
 
   // --- NEW: CALCULATION MODE ---
-  const [calcMode, setCalcMode] = useState('standard'); // 'standard' or 'reverse'
+  const [calcMode, setCalcMode] = useState('standard'); 
 
   const [values, setValues] = useState({
     address: '',
@@ -56,7 +61,7 @@ const NapkinCalculator = () => {
     taxes: 4500,
     insurance: 1200,
     hoa: 0,
-    targetDscr: 1.25 // For Reverse Mode
+    targetDscr: 1.25 
   });
 
   const [metrics, setMetrics] = useState({ 
@@ -64,7 +69,7 @@ const NapkinCalculator = () => {
     cashFlow: 0, 
     pitia: 0, 
     loanAmount: 0,
-    maxOffer: 0 // For Reverse Mode
+    maxOffer: 0 
   });
 
   // --- INSTALL LISTENER ---
@@ -93,6 +98,43 @@ const NapkinCalculator = () => {
     setFeedbackText('');
   };
 
+  // --- BACKUP & RESTORE LOGIC ---
+  const handleBackup = async () => {
+    try {
+        const data = await db.properties.toArray();
+        const blob = new Blob([JSON.stringify(data)], {type: "application/json"});
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `EquiCheck_Backup_${new Date().toISOString().slice(0,10)}.json`;
+        link.click();
+    } catch (err) {
+        alert("Backup failed: " + err.message);
+    }
+  };
+
+  const handleRestore = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    if (!window.confirm("This will overwrite your current property list. Continue?")) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+        try {
+            const data = JSON.parse(event.target.result);
+            if (!Array.isArray(data)) throw new Error("Invalid format");
+            
+            await db.properties.clear();
+            await db.properties.bulkAdd(data);
+            alert("Data Restored Successfully!");
+        } catch (err) {
+            alert("Restore failed: Invalid backup file.");
+        }
+    };
+    reader.readAsText(file);
+  };
+
   // --- CORE MATH ---
   useEffect(() => {
     const monthlyRate = values.interestRate / 100 / 12;
@@ -102,7 +144,6 @@ const NapkinCalculator = () => {
     const fixedCosts = monthlyTaxes + monthlyInsurance + values.hoa;
 
     if (calcMode === 'standard') {
-        // STANDARD: Price -> DSCR
         const loanAmount = values.price * (1 - values.downPaymentPercent / 100);
         const mortgage = loanAmount * (monthlyRate * Math.pow(1 + monthlyRate, n)) / (Math.pow(1 + monthlyRate, n) - 1);
         const pitia = mortgage + fixedCosts;
@@ -117,26 +158,17 @@ const NapkinCalculator = () => {
             maxOffer: 0
         });
     } else {
-        // REVERSE: Target DSCR -> Max Price
-        // 1. Max Allowable PITIA = Rent / TargetDSCR
         const maxPitia = values.rent / values.targetDscr;
-        
-        // 2. Max Mortgage Payment = Max PITIA - Fixed Costs
         const maxMortgagePayment = maxPitia - fixedCosts;
 
         if (maxMortgagePayment > 0) {
-            // 3. Solve for Loan Amount (PV of annuity)
-            // PV = PMT * (1 - (1+r)^-n) / r
             const maxLoan = maxMortgagePayment * (1 - Math.pow(1 + monthlyRate, -n)) / monthlyRate;
-            
-            // 4. Solve for Purchase Price = Loan / LTV
-            // LTV = (100 - Down%) / 100
             const ltv = (100 - values.downPaymentPercent) / 100;
             const maxPrice = maxLoan / ltv;
 
             setMetrics({
-                dscr: values.targetDscr, // Display target
-                cashFlow: Math.round(values.rent - maxPitia), // Flow at that target
+                dscr: values.targetDscr,
+                cashFlow: Math.round(values.rent - maxPitia),
                 pitia: Math.round(maxPitia),
                 loanAmount: Math.round(maxLoan),
                 maxOffer: Math.round(maxPrice)
@@ -153,7 +185,6 @@ const NapkinCalculator = () => {
     setValues({ ...values, [name]: newValue });
   };
 
-  // --- PHOTO & PDF HANDLERS (Unchanged logic) ---
   const handlePhotoCapture = async (e) => {
     if (e.target.files && e.target.files[0]) {
       setIsCompressing(true);
@@ -190,7 +221,6 @@ const NapkinCalculator = () => {
     doc.setFillColor(240, 240, 240);
     doc.rect(15, yPos - 5, pageWidth - 30, 35, 'F');
     
-    // PDF Logic for REVERSE mode needs to show Max Offer
     if (calcMode === 'reverse') {
          doc.setFontSize(12);
          doc.text("TARGET DSCR", 25, yPos + 5);
@@ -218,7 +248,6 @@ const NapkinCalculator = () => {
     doc.text("Financial Inputs", 20, yPos); yPos += 10;
     doc.setFontSize(10);
     
-    // In Reverse Mode, Price is an Output, not Input
     if (calcMode === 'standard') {
         doc.text(`Purchase Price: $${values.price.toLocaleString()}`, 20, yPos);
     } else {
@@ -264,7 +293,6 @@ const NapkinCalculator = () => {
   const handleSave = async () => {
     if (!values.address) { alert("Address required!"); return; }
     try {
-        // Save the correct "Price" depending on mode
         const finalPrice = calcMode === 'standard' ? values.price : metrics.maxOffer;
         await db.properties.add({
             address: values.address,
@@ -283,7 +311,7 @@ const NapkinCalculator = () => {
   const loadProperty = (prop) => {
     setValues({ ...prop.fullData, notes: prop.fullData.notes || '' });
     setImages(prop.images || []);
-    setCalcMode('standard'); // Default to standard when loading
+    setCalcMode('standard');
     setShowHistory(false);
   };
 
@@ -327,27 +355,16 @@ const NapkinCalculator = () => {
       <div className="flex-grow">
           {!showHistory ? (
             <>
-                {/* ADDRESS & HISTORY BUTTON */}
                 <div className="flex gap-2 mb-4">
                      <input type="text" name="address" placeholder="Property Address" value={values.address} onChange={handleChange} className="flex-grow bg-gray-800 border-b-2 border-gray-600 focus:border-blue-500 p-2 text-lg outline-none"/>
                      <button onClick={() => setShowHistory(true)} className="text-xs bg-gray-800 px-3 py-1 rounded border border-gray-600 whitespace-nowrap">Load Saved</button>
                 </div>
 
-                {/* MODE TOGGLE */}
                 <div className="flex bg-gray-800 p-1 rounded-lg mb-4">
-                    <button 
-                        onClick={() => setCalcMode('standard')}
-                        className={`flex-1 py-2 rounded text-sm font-bold ${calcMode === 'standard' ? 'bg-blue-600 text-white' : 'text-gray-400'}`}>
-                        Standard
-                    </button>
-                    <button 
-                        onClick={() => setCalcMode('reverse')}
-                        className={`flex-1 py-2 rounded text-sm font-bold ${calcMode === 'reverse' ? 'bg-blue-600 text-white' : 'text-gray-400'}`}>
-                        Max Offer (MAO)
-                    </button>
+                    <button onClick={() => setCalcMode('standard')} className={`flex-1 py-2 rounded text-sm font-bold ${calcMode === 'standard' ? 'bg-blue-600 text-white' : 'text-gray-400'}`}>Standard</button>
+                    <button onClick={() => setCalcMode('reverse')} className={`flex-1 py-2 rounded text-sm font-bold ${calcMode === 'reverse' ? 'bg-blue-600 text-white' : 'text-gray-400'}`}>Max Offer (MAO)</button>
                 </div>
 
-                {/* SCORE GAUGE */}
                 <div className={`mb-6 p-4 border-2 rounded-xl text-center transition-colors ${getScoreColor(metrics.dscr)}`}>
                     {calcMode === 'standard' ? (
                         <div className="flex justify-around items-center">
@@ -363,7 +380,6 @@ const NapkinCalculator = () => {
                     )}
                 </div>
 
-                {/* FIELD NOTES & PHOTOS */}
                 <div className="mb-6"><label className="text-xs text-gray-500 mb-1 block">Field Notes</label><textarea name="notes" value={values.notes} onChange={handleChange} placeholder="Notes..." className="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm h-20 focus:outline-none focus:border-blue-500" /></div>
                 
                 <div className="mb-6 bg-gray-800 p-4 rounded-lg">
@@ -374,17 +390,14 @@ const NapkinCalculator = () => {
                     <div className="flex gap-2 overflow-x-auto">{images.map((imgSrc, idx) => (<div key={idx} className="relative flex-shrink-0"><img src={imgSrc} alt="Prop" className="h-16 w-16 object-cover rounded" /><button onClick={() => removeImage(idx)} className="absolute -top-1 -right-1 bg-red-600 rounded-full w-4 h-4 flex items-center justify-center text-[10px]">x</button></div>))}</div>
                 </div>
 
-                {/* INPUTS (CONDITIONAL) */}
                 <div className="space-y-4 text-sm mb-20">
                     <div className="grid grid-cols-2 gap-4">
-                        {/* CONDITIONAL FIRST ROW */}
                         {calcMode === 'standard' ? (
                              <div><label className="text-gray-500">Price</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>
                         ) : (
                              <div><label className="text-blue-400 font-bold">Target DSCR</label><input type="number" name="targetDscr" value={values.targetDscr} onChange={handleChange} className="w-full bg-gray-800 border border-blue-500 p-2 rounded"/></div>
                         )}
                         <div><label className="text-gray-500">Rent</label><input type="number" name="rent" value={values.rent} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>
-                        
                         <div><label className="text-gray-500">Rate (%)</label><input type="number" name="interestRate" value={values.interestRate} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>
                         <div><label className="text-gray-500">Tax/Yr</label><input type="number" name="taxes" value={values.taxes} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>
                         <div><label className="text-gray-500">Ins/Yr</label><input type="number" name="insurance" value={values.insurance} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>
@@ -400,7 +413,38 @@ const NapkinCalculator = () => {
           ) : (
             <>
                 <div className="flex justify-end mb-4"><button onClick={() => setShowHistory(false)} className="text-xs bg-gray-800 px-3 py-1 rounded border border-gray-600">Close List</button></div>
-                <div className="space-y-2">{savedProperties?.map((prop) => (<div key={prop.id} onClick={() => loadProperty(prop)} className="bg-gray-800 p-4 rounded-lg flex justify-between cursor-pointer hover:bg-gray-700"><div><div className="font-bold">{prop.address}</div><div className="text-xs text-gray-400">{prop.images?.length || 0} Photos</div></div><div className={`font-bold ${getScoreColor(prop.dscr).split(' ')[0]}`}>{prop.dscr}</div></div>))}</div>
+                
+                {/* SAVED LIST */}
+                <div className="space-y-2 mb-8">
+                    {savedProperties?.map((prop) => (
+                        <div key={prop.id} onClick={() => loadProperty(prop)} className="bg-gray-800 p-4 rounded-lg flex justify-between cursor-pointer hover:bg-gray-700">
+                            <div><div className="font-bold">{prop.address}</div><div className="text-xs text-gray-400">{prop.images?.length || 0} Photos</div></div>
+                            <div className={`font-bold ${getScoreColor(prop.dscr).split(' ')[0]}`}>{prop.dscr}</div>
+                        </div>
+                    ))}
+                    {savedProperties?.length === 0 && <div className="text-center text-gray-500">No properties saved yet.</div>}
+                </div>
+
+                {/* DATA MANAGEMENT */}
+                <div className="border-t border-gray-700 pt-6">
+                    <h3 className="text-xs font-bold text-gray-500 uppercase mb-4">Data Management</h3>
+                    <div className="flex gap-4">
+                        <button onClick={handleBackup} className="flex-1 bg-gray-700 py-3 rounded text-sm hover:bg-gray-600">
+                            ⬇️ Backup Data
+                        </button>
+                        <button onClick={() => fileInputRef.current.click()} className="flex-1 bg-gray-700 py-3 rounded text-sm hover:bg-gray-600">
+                            ⬆️ Restore Data
+                        </button>
+                        <input 
+                            type="file" 
+                            ref={fileInputRef} 
+                            onChange={handleRestore} 
+                            accept=".json" 
+                            className="hidden" 
+                        />
+                    </div>
+                    <p className="text-[10px] text-gray-500 mt-2 text-center">Save your 'backup.json' to Google Drive or Email for safekeeping.</p>
+                </div>
             </>
           )}
       </div>
