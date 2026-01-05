@@ -26,7 +26,7 @@ const loadImageForPDF = (url) => {
     });
 };
 
-// Debounce helper for autocomplete
+// Debounce helper
 const useDebounce = (value, delay) => {
   const [debouncedValue, setDebouncedValue] = useState(value);
   useEffect(() => {
@@ -48,11 +48,13 @@ const NapkinCalculator = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [feedbackText, setFeedbackText] = useState('');
   const fileInputRef = useRef(null);
-  const [isLoadingData, setIsLoadingData] = useState(false); // Spinner state
+  const [isLoadingData, setIsLoadingData] = useState(false); 
 
   // Autocomplete State
   const [suggestions, setSuggestions] = useState([]);
   const [showDropdown, setShowDropdown] = useState(false);
+  // Default to US Center, update with GPS if available
+  const [userLocation, setUserLocation] = useState({ lat: 39.5, lon: -98.35 }); 
 
   // --- MODES ---
   const [calcMode, setCalcMode] = useState('standard'); 
@@ -65,7 +67,7 @@ const NapkinCalculator = () => {
     targetDscr: 1.25, vacancy: 5, expenseRatio: 35, 
     mgmt: 5, maint: 5, utils: 0,
     primaryRate: 7.5, primaryLtv: 80,
-    rentCastKey: '' // NEW: Store User API Key
+    rentCastKey: ''
   });
 
   // --- CAPITAL STACK ---
@@ -92,11 +94,11 @@ const NapkinCalculator = () => {
     investorFlow: 0, sponsorFlow: 0, investorCoc: 0, sponsorCoc: 0
   });
 
-  // --- DEBOUNCED ADDRESS FOR AUTOCOMPLETE ---
   const debouncedAddress = useDebounce(values.address, 300);
 
-  // --- INIT ---
+  // --- INIT: GET GPS LOCATION ---
   useEffect(() => {
+    // 1. Load Defaults
     const stored = localStorage.getItem('equicheck_defaults');
     if (stored) {
         const p = JSON.parse(stored);
@@ -104,20 +106,30 @@ const NapkinCalculator = () => {
         setValues(prev => ({ ...prev, ...p }));
         setLoans([{ id: 1, name: 'Senior Debt', ltv: p.primaryLtv || 80, rate: p.primaryRate || 7.5, isIO: false }]);
     }
+    
+    // 2. Get User Location for Better Autocomplete
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+            (pos) => setUserLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+            (err) => console.log("GPS denied, using US Center"),
+            { enableHighAccuracy: false, timeout: 5000 }
+        );
+    }
   }, []);
 
-  // Sync GrossAnnual
   useEffect(() => {
      if (values.grossAnnual === 0 && values.rent > 0) {
          setValues(prev => ({...prev, grossAnnual: prev.rent * 12}));
      }
   }, []);
 
-  // --- AUTOCOMPLETE FETCH (Photon) ---
+  // --- AUTOCOMPLETE FETCH (With Logic) ---
   useEffect(() => {
     if (debouncedAddress.length > 2 && showDropdown) {
-        // Bias towards US (roughly)
-        fetch(`https://photon.komoot.io/api/?q=${debouncedAddress}&limit=5&lat=39.5&lon=-98.35`) 
+        // STRATEGY: Strip unit numbers (Apt, Unit, #) because geocoders hate them
+        const cleanQuery = debouncedAddress.replace(/(\s+#\w+)|(\s+(apt|unit|ste)\s+\w+)/gi, '');
+
+        fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(cleanQuery)}&limit=5&lat=${userLocation.lat}&lon=${userLocation.lon}`) 
         .then(res => res.json())
         .then(data => {
             setSuggestions(data.features);
@@ -126,7 +138,7 @@ const NapkinCalculator = () => {
     } else {
         setSuggestions([]);
     }
-  }, [debouncedAddress, showDropdown]);
+  }, [debouncedAddress, showDropdown, userLocation]);
 
   // --- RENTCAST DATA FETCH ---
   const fetchPropertyData = async (selectedAddress) => {
@@ -142,23 +154,18 @@ const NapkinCalculator = () => {
         
         if (data && data.length > 0) {
             const prop = data[0];
-            // Alert logic or toast could go here
             const newValues = { ...values, address: selectedAddress };
             
-            // 1. Price (AVM or Last Sale)
             if (prop.price) newValues.price = prop.price;
             else if (prop.lastSalePrice) newValues.price = prop.lastSalePrice;
 
-            // 2. Rent (Estimate)
             if (prop.rent) {
                 newValues.rent = prop.rent;
                 newValues.grossAnnual = prop.rent * 12;
             }
 
-            // 3. Tax (Last Year)
             if (prop.lastTaxAmount) newValues.taxes = prop.lastTaxAmount;
             
-            // 4. Square Footage / Details (Add to notes)
             const details = `\n[Auto-Fill Data]\nBeds: ${prop.bedrooms || '?'} | Baths: ${prop.bathrooms || '?'}\nSqFt: ${prop.squareFootage || '?'}\nBuilt: ${prop.yearBuilt || '?'}`;
             newValues.notes = (newValues.notes || '') + details;
 
@@ -173,14 +180,11 @@ const NapkinCalculator = () => {
   };
 
   const handleAddressSelect = (feature) => {
-    // Construct address from Photon feature
     const p = feature.properties;
     const fullAddr = `${p.housenumber || ''} ${p.street || ''}, ${p.city || ''}, ${p.state || ''} ${p.postcode || ''}`.trim().replace(/^ ,/, '');
     
     setValues(prev => ({ ...prev, address: fullAddr }));
     setShowDropdown(false);
-    
-    // Trigger RentCast
     fetchPropertyData(fullAddr);
   };
 
@@ -318,7 +322,7 @@ const NapkinCalculator = () => {
         dscr: parseFloat(dscr.toFixed(2)), 
         cashFlow: Math.round(cashFlow), 
         pitia: Math.round(pitia), 
-        totalLoanAmount: Math.round(totalLoanAmount),
+        totalLoanAmount: Math.round(totalLoanAmount), 
         maxOffer: Math.round(maxOffer), 
         cashOut: Math.round(cashOut),
         capRate: parseFloat(capRate.toFixed(2)), 
@@ -459,13 +463,11 @@ const NapkinCalculator = () => {
             <div className="bg-gray-800 p-6 rounded-lg w-full max-w-sm border border-gray-600 max-h-[80vh] overflow-y-auto">
                 <h3 className="text-xl font-bold mb-4">Global Defaults</h3>
                 <div className="space-y-3 text-sm">
-                    {/* NEW: API KEY */}
                     <div className="bg-gray-900 p-2 rounded border border-blue-900/50">
                         <label className="text-blue-400 font-bold mb-1 block">RentCast API Key</label>
                         <input type="text" name="rentCastKey" value={defaults.rentCastKey} onChange={handleDefaultChange} placeholder="Paste key here..." className="w-full bg-gray-800 p-2 rounded border border-gray-700 text-xs"/>
                         <a href="https://rentcast.io/api" target="_blank" rel="noreferrer" className="text-[10px] text-gray-400 underline mt-1 block">Get a free key here</a>
                     </div>
-
                     <div><label className="text-gray-400">Primary Rate (%)</label><input type="number" name="primaryRate" value={defaults.primaryRate} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
                     <div><label className="text-gray-400">Primary LTV %</label><input type="number" name="primaryLtv" value={defaults.primaryLtv} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
                     <div className="pt-2 border-t border-gray-700 font-bold text-gray-500">CRE Defaults</div>
@@ -493,26 +495,13 @@ const NapkinCalculator = () => {
                 <div className="flex gap-2 mb-4 relative">
                      {/* AUTOCOMPLETE DROPDOWN */}
                      <div className="flex-grow relative">
-                         <input 
-                            type="text" 
-                            name="address" 
-                            placeholder="Property Address" 
-                            value={values.address} 
-                            onChange={handleManualAddressChange} 
-                            autoComplete="off"
-                            className="w-full bg-gray-800 border-b-2 border-gray-600 focus:border-blue-500 p-2 text-lg outline-none"
-                         />
+                         <input type="text" name="address" placeholder="Property Address" value={values.address} onChange={handleManualAddressChange} autoComplete="off" className="w-full bg-gray-800 border-b-2 border-gray-600 focus:border-blue-500 p-2 text-lg outline-none"/>
                          {suggestions.length > 0 && showDropdown && (
                              <ul className="absolute z-50 left-0 right-0 bg-gray-800 border border-gray-600 rounded-b shadow-xl max-h-48 overflow-y-auto">
                                  {suggestions.map((s, i) => {
                                      const p = s.properties;
                                      const label = `${p.housenumber || ''} ${p.street || ''}, ${p.city || ''} ${p.state || ''}`;
-                                     return (
-                                         <li key={i} onClick={() => handleAddressSelect(s)} className="p-3 border-b border-gray-700 hover:bg-gray-700 cursor-pointer text-sm">
-                                             <div className="font-bold text-white">{p.name || (p.housenumber + ' ' + p.street)}</div>
-                                             <div className="text-gray-400 text-xs">{p.city}, {p.state} {p.postcode}</div>
-                                         </li>
-                                     );
+                                     return (<li key={i} onClick={() => handleAddressSelect(s)} className="p-3 border-b border-gray-700 hover:bg-gray-700 cursor-pointer text-sm"><div className="font-bold text-white">{p.name || (p.housenumber + ' ' + p.street)}</div><div className="text-gray-400 text-xs">{p.city}, {p.state} {p.postcode}</div></li>);
                                  })}
                              </ul>
                          )}
@@ -569,13 +558,11 @@ const NapkinCalculator = () => {
                 {/* INPUTS */}
                 <div className="space-y-4 text-sm mb-20">
                     <div className="grid grid-cols-2 gap-4">
-                        {/* Price Fields */}
                         {calcMode === 'standard' && <div><label className="text-gray-500">Price</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
                         {calcMode === 'reverse' && <div><label className="text-blue-400 font-bold">Target DSCR</label><input type="number" name="targetDscr" value={values.targetDscr} onChange={handleChange} className="w-full bg-gray-800 border border-blue-500 p-2 rounded"/></div>}
                         {calcMode === 'refi' && <div><label className="text-purple-400 font-bold">Appraised Value</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 border border-purple-500 p-2 rounded"/></div>}
                         {calcMode === 'cre' && <div><label className="text-gray-500">Price</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
                         
-                        {/* Income Fields */}
                         {calcMode === 'cre' ? (
                              <div><label className="text-green-400 font-bold">Gross Annual Inc</label><input type="number" name="grossAnnual" value={values.grossAnnual} onChange={handleChange} className="w-full bg-gray-800 border border-green-500 p-2 rounded"/></div>
                         ) : (
