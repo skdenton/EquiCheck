@@ -26,6 +26,16 @@ const loadImageForPDF = (url) => {
     });
 };
 
+// Debounce helper for autocomplete
+const useDebounce = (value, delay) => {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+  useEffect(() => {
+    const handler = setTimeout(() => setDebouncedValue(value), delay);
+    return () => clearTimeout(handler);
+  }, [value, delay]);
+  return debouncedValue;
+};
+
 const NapkinCalculator = () => {
   const savedProperties = useLiveQuery(() => db.properties.toArray());
   const [showHistory, setShowHistory] = useState(false);
@@ -38,18 +48,24 @@ const NapkinCalculator = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [feedbackText, setFeedbackText] = useState('');
   const fileInputRef = useRef(null);
+  const [isLoadingData, setIsLoadingData] = useState(false); // Spinner state
+
+  // Autocomplete State
+  const [suggestions, setSuggestions] = useState([]);
+  const [showDropdown, setShowDropdown] = useState(false);
 
   // --- MODES ---
   const [calcMode, setCalcMode] = useState('standard'); 
   const [isItemized, setIsItemized] = useState(false);
-  const [isPartnership, setIsPartnership] = useState(false); // NEW: Partnership Toggle
+  const [isPartnership, setIsPartnership] = useState(false);
 
   // --- DEFAULTS ---
   const [defaults, setDefaults] = useState({
     taxes: 4500, insurance: 1200, hoa: 0,
     targetDscr: 1.25, vacancy: 5, expenseRatio: 35, 
     mgmt: 5, maint: 5, utils: 0,
-    primaryRate: 7.5, primaryLtv: 80
+    primaryRate: 7.5, primaryLtv: 80,
+    rentCastKey: '' // NEW: Store User API Key
   });
 
   // --- CAPITAL STACK ---
@@ -65,9 +81,7 @@ const NapkinCalculator = () => {
     vacancy: 5, expenseRatio: 35,
     mgmt: 5, maint: 5, utils: 0,
     targetDscr: 1.25,
-    // Partnership Specifics
-    investorEquity: 50, // % ownership for investor
-    investorCapital: 100 // % of cash needed provided by investor
+    investorEquity: 50, investorCapital: 100 
   });
 
   const [metrics, setMetrics] = useState({ 
@@ -75,9 +89,11 @@ const NapkinCalculator = () => {
     maxOffer: 0, cashOut: 0,
     capRate: 0, noi: 0, coc: 0,
     blendedRate: 0, cltv: 0,
-    // Partnership Metrics
     investorFlow: 0, sponsorFlow: 0, investorCoc: 0, sponsorCoc: 0
   });
+
+  // --- DEBOUNCED ADDRESS FOR AUTOCOMPLETE ---
+  const debouncedAddress = useDebounce(values.address, 300);
 
   // --- INIT ---
   useEffect(() => {
@@ -90,11 +106,88 @@ const NapkinCalculator = () => {
     }
   }, []);
 
+  // Sync GrossAnnual
   useEffect(() => {
      if (values.grossAnnual === 0 && values.rent > 0) {
          setValues(prev => ({...prev, grossAnnual: prev.rent * 12}));
      }
   }, []);
+
+  // --- AUTOCOMPLETE FETCH (Photon) ---
+  useEffect(() => {
+    if (debouncedAddress.length > 2 && showDropdown) {
+        // Bias towards US (roughly)
+        fetch(`https://photon.komoot.io/api/?q=${debouncedAddress}&limit=5&lat=39.5&lon=-98.35`) 
+        .then(res => res.json())
+        .then(data => {
+            setSuggestions(data.features);
+        })
+        .catch(err => console.error(err));
+    } else {
+        setSuggestions([]);
+    }
+  }, [debouncedAddress, showDropdown]);
+
+  // --- RENTCAST DATA FETCH ---
+  const fetchPropertyData = async (selectedAddress) => {
+    if (!defaults.rentCastKey) return; 
+    setIsLoadingData(true);
+    
+    try {
+        const response = await fetch(`https://api.rentcast.io/v1/properties?address=${encodeURIComponent(selectedAddress)}`, {
+            headers: { 'X-Api-Key': defaults.rentCastKey }
+        });
+        
+        const data = await response.json();
+        
+        if (data && data.length > 0) {
+            const prop = data[0];
+            // Alert logic or toast could go here
+            const newValues = { ...values, address: selectedAddress };
+            
+            // 1. Price (AVM or Last Sale)
+            if (prop.price) newValues.price = prop.price;
+            else if (prop.lastSalePrice) newValues.price = prop.lastSalePrice;
+
+            // 2. Rent (Estimate)
+            if (prop.rent) {
+                newValues.rent = prop.rent;
+                newValues.grossAnnual = prop.rent * 12;
+            }
+
+            // 3. Tax (Last Year)
+            if (prop.lastTaxAmount) newValues.taxes = prop.lastTaxAmount;
+            
+            // 4. Square Footage / Details (Add to notes)
+            const details = `\n[Auto-Fill Data]\nBeds: ${prop.bedrooms || '?'} | Baths: ${prop.bathrooms || '?'}\nSqFt: ${prop.squareFootage || '?'}\nBuilt: ${prop.yearBuilt || '?'}`;
+            newValues.notes = (newValues.notes || '') + details;
+
+            setValues(newValues);
+        }
+    } catch (error) {
+        console.error("RentCast Error:", error);
+        alert("Could not fetch property data. Check API Key.");
+    } finally {
+        setIsLoadingData(false);
+    }
+  };
+
+  const handleAddressSelect = (feature) => {
+    // Construct address from Photon feature
+    const p = feature.properties;
+    const fullAddr = `${p.housenumber || ''} ${p.street || ''}, ${p.city || ''}, ${p.state || ''} ${p.postcode || ''}`.trim().replace(/^ ,/, '');
+    
+    setValues(prev => ({ ...prev, address: fullAddr }));
+    setShowDropdown(false);
+    
+    // Trigger RentCast
+    fetchPropertyData(fullAddr);
+  };
+
+  const handleManualAddressChange = (e) => {
+      setValues({ ...values, address: e.target.value });
+      setShowDropdown(true);
+  };
 
   // --- LISTENERS ---
   useEffect(() => {
@@ -168,7 +261,7 @@ const NapkinCalculator = () => {
 
     let dscr=0, cashFlow=0, pitia=0, totalLoanAmount=0, maxOffer=0, cashOut=0, capRate=0, noi=0, coc=0, totalDebtService=0, blendedRate=0;
 
-    // --- DEBT CALCULATION ---
+    // DEBT CALC
     if (calcMode === 'reverse') {
         const primary = loans[0];
         const mRate = primary.rate / 100 / 12;
@@ -212,17 +305,11 @@ const NapkinCalculator = () => {
         coc = cashInvested > 0 ? ((cashFlow * 12) / cashInvested) * 100 : 0;
     }
 
-    // --- PARTNERSHIP MATH ---
-    // Total Cash Required = Price - TotalLoans (simplified, ignoring closing costs for napkin)
+    // PARTNERSHIP
     const totalCashRequired = Math.max(0, price - totalLoanAmount);
-    
-    // Investor Side
     const investorCashIn = totalCashRequired * (v('investorCapital') / 100);
     const investorFlow = cashFlow * (v('investorEquity') / 100);
-    // Avoid div by zero. If Investor puts 0 cash but gets flow, return is Infinite (9999)
     const investorCoc = investorCashIn > 0 ? ((investorFlow * 12) / investorCashIn) * 100 : (investorFlow > 0 ? 9999 : 0);
-
-    // Sponsor Side
     const sponsorCashIn = totalCashRequired * ((100 - v('investorCapital')) / 100);
     const sponsorFlow = cashFlow * ((100 - v('investorEquity')) / 100);
     const sponsorCoc = sponsorCashIn > 0 ? ((sponsorFlow * 12) / sponsorCashIn) * 100 : (sponsorFlow > 0 ? 9999 : 0);
@@ -249,13 +336,14 @@ const NapkinCalculator = () => {
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    const finalVal = (name === 'address' || name === 'notes') ? value : (value === '' ? '' : parseFloat(value));
+    const finalVal = (name === 'address' || name === 'notes' || name === 'rentCastKey') ? value : (value === '' ? '' : parseFloat(value));
     setValues({ ...values, [name]: finalVal });
   };
   
   const handleDefaultChange = (e) => {
     const { name, value } = e.target;
-    setDefaults({ ...defaults, [name]: value === '' ? '' : parseFloat(value) });
+    const finalVal = (name === 'rentCastKey') ? value : (value === '' ? '' : parseFloat(value));
+    setDefaults({ ...defaults, [name]: finalVal });
   };
 
   const handlePhotoCapture = async (e) => {
@@ -340,7 +428,6 @@ const NapkinCalculator = () => {
     if (prop.loans && prop.loans.length > 0) {
         setLoans(prop.loans);
     } else {
-        // LEGACY SAVE SUPPORT (V1.0)
         const oldLtv = 100 - (prop.fullData.downPaymentPercent || 20);
         const oldRate = prop.fullData.interestRate || 7.5;
         setLoans([{ id: 1, name: 'Senior Debt', ltv: oldLtv, rate: oldRate, isIO: false }]);
@@ -372,6 +459,13 @@ const NapkinCalculator = () => {
             <div className="bg-gray-800 p-6 rounded-lg w-full max-w-sm border border-gray-600 max-h-[80vh] overflow-y-auto">
                 <h3 className="text-xl font-bold mb-4">Global Defaults</h3>
                 <div className="space-y-3 text-sm">
+                    {/* NEW: API KEY */}
+                    <div className="bg-gray-900 p-2 rounded border border-blue-900/50">
+                        <label className="text-blue-400 font-bold mb-1 block">RentCast API Key</label>
+                        <input type="text" name="rentCastKey" value={defaults.rentCastKey} onChange={handleDefaultChange} placeholder="Paste key here..." className="w-full bg-gray-800 p-2 rounded border border-gray-700 text-xs"/>
+                        <a href="https://rentcast.io/api" target="_blank" rel="noreferrer" className="text-[10px] text-gray-400 underline mt-1 block">Get a free key here</a>
+                    </div>
+
                     <div><label className="text-gray-400">Primary Rate (%)</label><input type="number" name="primaryRate" value={defaults.primaryRate} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
                     <div><label className="text-gray-400">Primary LTV %</label><input type="number" name="primaryLtv" value={defaults.primaryLtv} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
                     <div className="pt-2 border-t border-gray-700 font-bold text-gray-500">CRE Defaults</div>
@@ -396,8 +490,34 @@ const NapkinCalculator = () => {
       <div className="flex-grow">
           {!showHistory ? (
             <>
-                <div className="flex gap-2 mb-4">
-                     <input type="text" name="address" placeholder="Property Address" value={values.address} onChange={handleChange} className="flex-grow bg-gray-800 border-b-2 border-gray-600 focus:border-blue-500 p-2 text-lg outline-none"/>
+                <div className="flex gap-2 mb-4 relative">
+                     {/* AUTOCOMPLETE DROPDOWN */}
+                     <div className="flex-grow relative">
+                         <input 
+                            type="text" 
+                            name="address" 
+                            placeholder="Property Address" 
+                            value={values.address} 
+                            onChange={handleManualAddressChange} 
+                            autoComplete="off"
+                            className="w-full bg-gray-800 border-b-2 border-gray-600 focus:border-blue-500 p-2 text-lg outline-none"
+                         />
+                         {suggestions.length > 0 && showDropdown && (
+                             <ul className="absolute z-50 left-0 right-0 bg-gray-800 border border-gray-600 rounded-b shadow-xl max-h-48 overflow-y-auto">
+                                 {suggestions.map((s, i) => {
+                                     const p = s.properties;
+                                     const label = `${p.housenumber || ''} ${p.street || ''}, ${p.city || ''} ${p.state || ''}`;
+                                     return (
+                                         <li key={i} onClick={() => handleAddressSelect(s)} className="p-3 border-b border-gray-700 hover:bg-gray-700 cursor-pointer text-sm">
+                                             <div className="font-bold text-white">{p.name || (p.housenumber + ' ' + p.street)}</div>
+                                             <div className="text-gray-400 text-xs">{p.city}, {p.state} {p.postcode}</div>
+                                         </li>
+                                     );
+                                 })}
+                             </ul>
+                         )}
+                         {isLoadingData && <div className="absolute right-2 top-3 text-blue-500 text-xs animate-pulse">Loading...</div>}
+                     </div>
                      <button onClick={() => setShowHistory(true)} className="text-xs bg-gray-800 px-3 py-1 rounded border border-gray-600 whitespace-nowrap">Load Saved</button>
                 </div>
 
@@ -422,6 +542,12 @@ const NapkinCalculator = () => {
                             <div className="text-3xl font-bold text-white mb-2">${metrics.maxOffer.toLocaleString()}</div>
                             <div className="text-xs text-gray-300">To hit {values.targetDscr} DSCR</div>
                         </div>
+                    ) : calcMode === 'refi' ? (
+                        <div className="flex flex-col items-center">
+                            <div className="text-xs uppercase tracking-widest mb-1">Est. Cash Out</div>
+                            <div className={`text-4xl font-bold mb-2 ${metrics.cashOut >= 0 ? 'text-green-400' : 'text-red-500'}`}>${metrics.cashOut.toLocaleString()}</div>
+                            <div className="text-xs text-gray-300">New DSCR: {metrics.dscr}</div>
+                        </div>
                     ) : (
                         <div className="flex justify-around items-center">
                             <div><div className="text-4xl font-bold">{metrics.dscr}</div><div className="text-xs uppercase">DSCR</div></div>
@@ -443,11 +569,13 @@ const NapkinCalculator = () => {
                 {/* INPUTS */}
                 <div className="space-y-4 text-sm mb-20">
                     <div className="grid grid-cols-2 gap-4">
+                        {/* Price Fields */}
                         {calcMode === 'standard' && <div><label className="text-gray-500">Price</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
                         {calcMode === 'reverse' && <div><label className="text-blue-400 font-bold">Target DSCR</label><input type="number" name="targetDscr" value={values.targetDscr} onChange={handleChange} className="w-full bg-gray-800 border border-blue-500 p-2 rounded"/></div>}
                         {calcMode === 'refi' && <div><label className="text-purple-400 font-bold">Appraised Value</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 border border-purple-500 p-2 rounded"/></div>}
                         {calcMode === 'cre' && <div><label className="text-gray-500">Price</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
                         
+                        {/* Income Fields */}
                         {calcMode === 'cre' ? (
                              <div><label className="text-green-400 font-bold">Gross Annual Inc</label><input type="number" name="grossAnnual" value={values.grossAnnual} onChange={handleChange} className="w-full bg-gray-800 border border-green-500 p-2 rounded"/></div>
                         ) : (
@@ -512,7 +640,7 @@ const NapkinCalculator = () => {
                         </div>
                     )}
 
-                    {/* PARTNERSHIP SECTION (NEW) */}
+                    {/* PARTNERSHIP SECTION */}
                     <div className="bg-gray-800 p-3 rounded-lg border border-purple-900/50">
                         <div className="flex items-center justify-between mb-2">
                              <h3 className="text-xs font-bold uppercase text-purple-400">Partnership Split</h3>
@@ -521,33 +649,15 @@ const NapkinCalculator = () => {
                         
                         {isPartnership && (
                             <div className="space-y-4">
-                                <div>
-                                    <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Investor Ownership</span><span className="text-purple-400 font-bold">{values.investorEquity}%</span></div>
-                                    <input type="range" name="investorEquity" min="0" max="100" step="5" value={values.investorEquity} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
-                                    <div className="text-[10px] text-gray-500 text-right">You own {100-values.investorEquity}%</div>
-                                </div>
-                                <div>
-                                    <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Investor Capital</span><span className="text-green-400 font-bold">{values.investorCapital}%</span></div>
-                                    <input type="range" name="investorCapital" min="0" max="100" step="5" value={values.investorCapital} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
-                                    <div className="text-[10px] text-gray-500 text-right">You put {100-values.investorCapital}%</div>
-                                </div>
-                                
+                                <div><div className="flex justify-between text-xs text-gray-400 mb-1"><span>Investor Ownership</span><span className="text-purple-400 font-bold">{values.investorEquity}%</span></div><input type="range" name="investorEquity" min="0" max="100" step="5" value={values.investorEquity} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" /><div className="text-[10px] text-gray-500 text-right">You own {100-values.investorEquity}%</div></div>
+                                <div><div className="flex justify-between text-xs text-gray-400 mb-1"><span>Investor Capital</span><span className="text-green-400 font-bold">{values.investorCapital}%</span></div><input type="range" name="investorCapital" min="0" max="100" step="5" value={values.investorCapital} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" /><div className="text-[10px] text-gray-500 text-right">You put {100-values.investorCapital}%</div></div>
                                 <div className="grid grid-cols-2 gap-2 mt-2">
-                                    <div className="bg-gray-900 p-2 rounded text-center">
-                                        <div className="text-[10px] text-gray-400 uppercase">Investor CoC</div>
-                                        <div className="text-xl font-bold text-green-400">{metrics.investorCoc >= 9999 ? '∞' : metrics.investorCoc + '%'}</div>
-                                        <div className="text-[10px] text-gray-500">${metrics.investorFlow}/mo</div>
-                                    </div>
-                                    <div className="bg-gray-900 p-2 rounded text-center">
-                                        <div className="text-[10px] text-gray-400 uppercase">Sponsor CoC</div>
-                                        <div className="text-xl font-bold text-blue-400">{metrics.sponsorCoc >= 9999 ? '∞' : metrics.sponsorCoc + '%'}</div>
-                                        <div className="text-[10px] text-gray-500">${metrics.sponsorFlow}/mo</div>
-                                    </div>
+                                    <div className="bg-gray-900 p-2 rounded text-center"><div className="text-[10px] text-gray-400 uppercase">Investor CoC</div><div className="text-xl font-bold text-green-400">{metrics.investorCoc >= 9999 ? '∞' : metrics.investorCoc + '%'}</div><div className="text-[10px] text-gray-500">${metrics.investorFlow}/mo</div></div>
+                                    <div className="bg-gray-900 p-2 rounded text-center"><div className="text-[10px] text-gray-400 uppercase">Sponsor CoC</div><div className="text-xl font-bold text-blue-400">{metrics.sponsorCoc >= 9999 ? '∞' : metrics.sponsorCoc + '%'}</div><div className="text-[10px] text-gray-500">${metrics.sponsorFlow}/mo</div></div>
                                 </div>
                             </div>
                         )}
                     </div>
-
                 </div>
 
                 <div className="fixed bottom-6 right-6 flex gap-3 z-40">
