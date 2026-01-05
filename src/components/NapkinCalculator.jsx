@@ -39,21 +39,20 @@ const NapkinCalculator = () => {
   const [feedbackText, setFeedbackText] = useState('');
   const fileInputRef = useRef(null);
 
-  // --- MODES: 'standard', 'reverse', 'refi', 'cre' ---
+  // --- MODES ---
   const [calcMode, setCalcMode] = useState('standard'); 
-  const [isItemized, setIsItemized] = useState(false); 
+  const [isItemized, setIsItemized] = useState(false);
+  const [isPartnership, setIsPartnership] = useState(false); // NEW: Partnership Toggle
 
   // --- DEFAULTS ---
   const [defaults, setDefaults] = useState({
     taxes: 4500, insurance: 1200, hoa: 0,
-    targetDscr: 1.25,
-    vacancy: 5, expenseRatio: 35, 
+    targetDscr: 1.25, vacancy: 5, expenseRatio: 35, 
     mgmt: 5, maint: 5, utils: 0,
     primaryRate: 7.5, primaryLtv: 80
   });
 
-  // --- CAPITAL STACK STATE ---
-  // Replaces simple rate/down variables. Default is one Senior loan.
+  // --- CAPITAL STACK ---
   const [loans, setLoans] = useState([
     { id: 1, name: 'Senior Debt', ltv: 80, rate: 7.5, isIO: false }
   ]);
@@ -65,14 +64,19 @@ const NapkinCalculator = () => {
     taxes: 4500, insurance: 1200, hoa: 0,
     vacancy: 5, expenseRatio: 35,
     mgmt: 5, maint: 5, utils: 0,
-    targetDscr: 1.25 
+    targetDscr: 1.25,
+    // Partnership Specifics
+    investorEquity: 50, // % ownership for investor
+    investorCapital: 100 // % of cash needed provided by investor
   });
 
   const [metrics, setMetrics] = useState({ 
     dscr: 0, cashFlow: 0, pitia: 0, totalLoanAmount: 0, 
     maxOffer: 0, cashOut: 0,
     capRate: 0, noi: 0, coc: 0,
-    blendedRate: 0, cltv: 0
+    blendedRate: 0, cltv: 0,
+    // Partnership Metrics
+    investorFlow: 0, sponsorFlow: 0, investorCoc: 0, sponsorCoc: 0
   });
 
   // --- INIT ---
@@ -82,12 +86,10 @@ const NapkinCalculator = () => {
         const p = JSON.parse(stored);
         setDefaults(p);
         setValues(prev => ({ ...prev, ...p }));
-        // Reset stack to default if needed, or keep existing logic
         setLoans([{ id: 1, name: 'Senior Debt', ltv: p.primaryLtv || 80, rate: p.primaryRate || 7.5, isIO: false }]);
     }
   }, []);
 
-  // Sync GrossAnnual
   useEffect(() => {
      if (values.grossAnnual === 0 && values.rent > 0) {
          setValues(prev => ({...prev, grossAnnual: prev.rent * 12}));
@@ -140,29 +142,16 @@ const NapkinCalculator = () => {
   };
 
   // --- LOAN MANAGEMENT ---
-  const updateLoan = (id, field, value) => {
-    setLoans(loans.map(l => l.id === id ? { ...l, [field]: value } : l));
-  };
-
-  const addLoan = () => {
-    const newId = loans.length > 0 ? Math.max(...loans.map(l => l.id)) + 1 : 1;
-    setLoans([...loans, { id: newId, name: 'Sub Debt', ltv: 10, rate: 10, isIO: true }]);
-  };
-
-  const removeLoan = (id) => {
-    if (loans.length === 1) return; // Must have at least 1
-    setLoans(loans.filter(l => l.id !== id));
-  };
+  const updateLoan = (id, field, value) => setLoans(loans.map(l => l.id === id ? { ...l, [field]: value } : l));
+  const addLoan = () => setLoans([...loans, { id: loans.length > 0 ? Math.max(...loans.map(l => l.id)) + 1 : 1, name: 'Sub Debt', ltv: 10, rate: 10, isIO: true }]);
+  const removeLoan = (id) => { if (loans.length > 1) setLoans(loans.filter(l => l.id !== id)); };
 
   // --- CORE MATH ENGINE ---
   useEffect(() => {
     const v = (key) => (values[key] === '' || values[key] === undefined) ? 0 : parseFloat(values[key]);
     const price = v('price');
-    
-    // Income
     const monthlyGross = calcMode === 'cre' ? (v('grossAnnual') / 12) : v('rent');
     
-    // Expenses
     let monthlyExpenses = 0;
     let fixedCosts = (v('taxes') / 12) + (v('insurance') / 12) + v('hoa');
 
@@ -179,9 +168,8 @@ const NapkinCalculator = () => {
 
     let dscr=0, cashFlow=0, pitia=0, totalLoanAmount=0, maxOffer=0, cashOut=0, capRate=0, noi=0, coc=0, totalDebtService=0, blendedRate=0;
 
-    // --- DEBT CALCULATION (CAPITAL STACK) ---
+    // --- DEBT CALCULATION ---
     if (calcMode === 'reverse') {
-        // Reverse Mode Simplification: Uses ONLY the Primary Loan logic (1st in stack)
         const primary = loans[0];
         const mRate = primary.rate / 100 / 12;
         const n = 30 * 12;
@@ -189,42 +177,28 @@ const NapkinCalculator = () => {
         const maxDebtPayment = maxPitia - fixedCosts;
         
         if (maxDebtPayment > 0) {
-            // Solve based on Amortization or IO of primary loan
             let calculatedLoan = 0;
-            if (primary.isIO) {
-                calculatedLoan = maxDebtPayment / mRate;
-            } else {
-                calculatedLoan = maxDebtPayment * (1 - Math.pow(1 + mRate, -n)) / mRate;
-            }
-            maxOffer = calculatedLoan / (primary.ltv / 100); // Assuming LTV implies "Loan-to-MaxPrice" here
+            if (primary.isIO) calculatedLoan = maxDebtPayment / mRate;
+            else calculatedLoan = maxDebtPayment * (1 - Math.pow(1 + mRate, -n)) / mRate;
+            maxOffer = calculatedLoan / (primary.ltv / 100);
             pitia = maxPitia;
             dscr = v('targetDscr');
             cashFlow = monthlyGross - pitia;
         }
     } else {
-        // Standard, Refi, CRE - Use Full Capital Stack
         let weightedRateSum = 0;
-
         loans.forEach(loan => {
             const amt = price * (loan.ltv / 100);
             totalLoanAmount += amt;
             weightedRateSum += (amt * loan.rate);
-
-            // Payment Calc
             const r = loan.rate / 100 / 12;
             let pmt = 0;
-            if (loan.isIO) {
-                pmt = amt * r;
-            } else {
-                const n = 30 * 12;
-                pmt = r > 0 ? amt * (r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1) : 0;
-            }
+            if (loan.isIO) pmt = amt * r;
+            else { const n = 30 * 12; pmt = r > 0 ? amt * (r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1) : 0; }
             totalDebtService += pmt;
         });
 
-        // Blended Rate
         blendedRate = totalLoanAmount > 0 ? (weightedRateSum / totalLoanAmount) : 0;
-
         const totalOutflow = totalDebtService + monthlyExpenses;
         pitia = totalOutflow;
         cashFlow = monthlyGross - totalOutflow;
@@ -232,14 +206,26 @@ const NapkinCalculator = () => {
 
         if (calcMode === 'refi') cashOut = totalLoanAmount - v('existingDebt');
 
-        // Metrics
         noi = (monthlyGross - monthlyExpenses) * 12;
         capRate = price > 0 ? (noi / price) * 100 : 0;
-        
-        // Cash Invested = Price - Total Loans
         const cashInvested = price - totalLoanAmount; 
-        coc = cashInvested > 0 ? ((cashFlow * 12) / cashInvested) * 100 : 0; // Infinite if 0 down
+        coc = cashInvested > 0 ? ((cashFlow * 12) / cashInvested) * 100 : 0;
     }
+
+    // --- PARTNERSHIP MATH ---
+    // Total Cash Required = Price - TotalLoans (simplified, ignoring closing costs for napkin)
+    const totalCashRequired = Math.max(0, price - totalLoanAmount);
+    
+    // Investor Side
+    const investorCashIn = totalCashRequired * (v('investorCapital') / 100);
+    const investorFlow = cashFlow * (v('investorEquity') / 100);
+    // Avoid div by zero. If Investor puts 0 cash but gets flow, return is Infinite (9999)
+    const investorCoc = investorCashIn > 0 ? ((investorFlow * 12) / investorCashIn) * 100 : (investorFlow > 0 ? 9999 : 0);
+
+    // Sponsor Side
+    const sponsorCashIn = totalCashRequired * ((100 - v('investorCapital')) / 100);
+    const sponsorFlow = cashFlow * ((100 - v('investorEquity')) / 100);
+    const sponsorCoc = sponsorCashIn > 0 ? ((sponsorFlow * 12) / sponsorCashIn) * 100 : (sponsorFlow > 0 ? 9999 : 0);
 
     setMetrics({ 
         dscr: parseFloat(dscr.toFixed(2)), 
@@ -252,7 +238,11 @@ const NapkinCalculator = () => {
         noi: Math.round(noi), 
         coc: parseFloat(coc.toFixed(2)),
         blendedRate: parseFloat(blendedRate.toFixed(3)),
-        cltv: loans.reduce((sum, l) => sum + l.ltv, 0)
+        cltv: loans.reduce((sum, l) => sum + l.ltv, 0),
+        investorFlow: Math.round(investorFlow),
+        sponsorFlow: Math.round(sponsorFlow),
+        investorCoc: parseFloat(investorCoc.toFixed(1)),
+        sponsorCoc: parseFloat(sponsorCoc.toFixed(1))
     });
 
   }, [values, calcMode, isItemized, loans]);
@@ -283,7 +273,6 @@ const NapkinCalculator = () => {
   const generatePDF = async () => {
     if (!values.address) { alert("Add an address first!"); return; }
     const doc = new jsPDF();
-    const pageWidth = doc.internal.pageSize.getWidth();
     let yPos = 20;
 
     const logoImg = await loadImageForPDF('/pwa-192x192.png');
@@ -296,24 +285,19 @@ const NapkinCalculator = () => {
     doc.text(values.address, 20, yPos); yPos += 15;
 
     doc.setFillColor(240, 240, 240);
-    doc.rect(15, yPos - 5, pageWidth - 30, 35, 'F');
+    doc.rect(15, yPos - 5, 180, 35, 'F');
     
     if (calcMode === 'cre') {
         doc.text("CAP RATE", 25, yPos + 5); doc.text("NOI (Annual)", 85, yPos + 5); doc.text("Cash-on-Cash", 145, yPos + 5);
         doc.setTextColor(0, 0, 255); doc.text(metrics.capRate + "%", 25, yPos + 15);
         doc.setTextColor(0, 150, 0); doc.text(`$${metrics.noi.toLocaleString()}`, 85, yPos + 15);
         doc.setTextColor(0, 0, 0); doc.text(metrics.coc + "%", 145, yPos + 15);
-    } else if (calcMode === 'reverse') {
-         doc.text("TARGET DSCR", 25, yPos + 5); doc.text("MAX OFFER PRICE", 85, yPos + 5);
-         doc.setTextColor(0, 0, 255); doc.text(metrics.dscr.toString(), 25, yPos + 15);
-         doc.setTextColor(0, 150, 0); doc.text(`$${metrics.maxOffer.toLocaleString()}`, 85, yPos + 15);
     } else {
          doc.text("DSCR SCORE", 25, yPos + 5); doc.text("CASH FLOW", 85, yPos + 5);
          doc.setTextColor(0, 0, 255); doc.text(metrics.dscr.toString(), 25, yPos + 15);
          doc.setTextColor(0, 150, 0); doc.text(`$${metrics.cashFlow}`, 85, yPos + 15);
     }
     
-    // Capital Stack Detail in PDF
     yPos += 45;
     doc.setTextColor(0); doc.setFontSize(12);
     doc.text("Capital Stack", 20, yPos); yPos += 10;
@@ -324,6 +308,17 @@ const NapkinCalculator = () => {
     });
     doc.text(`Blended Rate: ${metrics.blendedRate}% | CLTV: ${metrics.cltv}%`, 20, yPos + 2);
     yPos += 10;
+
+    if (isPartnership) {
+        doc.setFontSize(12); doc.text("Partnership Structure", 20, yPos); yPos += 10;
+        doc.setFontSize(10);
+        doc.text(`Investor: ${values.investorEquity}% Equity / ${values.investorCapital}% Capital`, 20, yPos);
+        doc.text(`Sponsor: ${100-values.investorEquity}% Equity / ${100-values.investorCapital}% Capital`, 20, yPos + 6);
+        doc.setTextColor(0,150,0);
+        doc.text(`Investor Return: ${metrics.investorCoc >= 9999 ? '∞' : metrics.investorCoc + '%'} CoC ($${metrics.investorFlow}/mo)`, 20, yPos + 14);
+        doc.setTextColor(0);
+        yPos += 25;
+    }
     
     doc.save(`${values.address.replace(/\s+/g, '_')}_EquiCheck.pdf`);
   };
@@ -342,7 +337,14 @@ const NapkinCalculator = () => {
 
   const loadProperty = (prop) => {
     setValues({ ...prop.fullData, notes: prop.fullData.notes || '' });
-    if(prop.loans) setLoans(prop.loans);
+    if (prop.loans && prop.loans.length > 0) {
+        setLoans(prop.loans);
+    } else {
+        // LEGACY SAVE SUPPORT (V1.0)
+        const oldLtv = 100 - (prop.fullData.downPaymentPercent || 20);
+        const oldRate = prop.fullData.interestRate || 7.5;
+        setLoans([{ id: 1, name: 'Senior Debt', ltv: oldLtv, rate: oldRate, isIO: false }]);
+    }
     setImages(prop.images || []); setCalcMode('standard'); setShowHistory(false);
   };
 
@@ -420,12 +422,6 @@ const NapkinCalculator = () => {
                             <div className="text-3xl font-bold text-white mb-2">${metrics.maxOffer.toLocaleString()}</div>
                             <div className="text-xs text-gray-300">To hit {values.targetDscr} DSCR</div>
                         </div>
-                    ) : calcMode === 'refi' ? (
-                        <div className="flex flex-col items-center">
-                            <div className="text-xs uppercase tracking-widest mb-1">Est. Cash Out</div>
-                            <div className={`text-4xl font-bold mb-2 ${metrics.cashOut >= 0 ? 'text-green-400' : 'text-red-500'}`}>${metrics.cashOut.toLocaleString()}</div>
-                            <div className="text-xs text-gray-300">New DSCR: {metrics.dscr}</div>
-                        </div>
                     ) : (
                         <div className="flex justify-around items-center">
                             <div><div className="text-4xl font-bold">{metrics.dscr}</div><div className="text-xs uppercase">DSCR</div></div>
@@ -447,13 +443,11 @@ const NapkinCalculator = () => {
                 {/* INPUTS */}
                 <div className="space-y-4 text-sm mb-20">
                     <div className="grid grid-cols-2 gap-4">
-                        {/* Price Fields */}
                         {calcMode === 'standard' && <div><label className="text-gray-500">Price</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
                         {calcMode === 'reverse' && <div><label className="text-blue-400 font-bold">Target DSCR</label><input type="number" name="targetDscr" value={values.targetDscr} onChange={handleChange} className="w-full bg-gray-800 border border-blue-500 p-2 rounded"/></div>}
                         {calcMode === 'refi' && <div><label className="text-purple-400 font-bold">Appraised Value</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 border border-purple-500 p-2 rounded"/></div>}
                         {calcMode === 'cre' && <div><label className="text-gray-500">Price</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
                         
-                        {/* Income Fields */}
                         {calcMode === 'cre' ? (
                              <div><label className="text-green-400 font-bold">Gross Annual Inc</label><input type="number" name="grossAnnual" value={values.grossAnnual} onChange={handleChange} className="w-full bg-gray-800 border border-green-500 p-2 rounded"/></div>
                         ) : (
@@ -469,10 +463,7 @@ const NapkinCalculator = () => {
                                 <label className="text-xs font-bold uppercase text-gray-400">Expenses</label>
                                 <button onClick={() => setIsItemized(!isItemized)} className="text-[10px] bg-gray-700 px-2 py-1 rounded hover:bg-gray-600">{isItemized ? 'Switch to Ratio' : 'Switch to Itemized'}</button>
                              </div>
-                             <div>
-                                <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Vacancy</span><span className="text-yellow-400 font-bold">{values.vacancy}%</span></div>
-                                <input type="range" name="vacancy" min="0" max="20" step="1" value={values.vacancy} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
-                             </div>
+                             <div><div className="flex justify-between text-xs text-gray-400 mb-1"><span>Vacancy</span><span className="text-yellow-400 font-bold">{values.vacancy}%</span></div><input type="range" name="vacancy" min="0" max="20" step="1" value={values.vacancy} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" /></div>
                              {!isItemized ? (
                                 <div><div className="flex justify-between text-xs text-gray-400 mb-1"><span>Expense Ratio</span><span className="text-red-400 font-bold">{values.expenseRatio}%</span></div><input type="range" name="expenseRatio" min="10" max="60" step="1" value={values.expenseRatio} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" /></div>
                              ) : (
@@ -487,54 +478,32 @@ const NapkinCalculator = () => {
                         </div>
                     )}
 
-                    {/* CAPITAL STACK (DYNAMIC DEBT) */}
+                    {/* CAPITAL STACK */}
                     {calcMode !== 'reverse' && (
                     <div className="bg-gray-800 p-3 rounded-lg space-y-4 border border-blue-900/50">
                         <div className="flex justify-between items-center border-b border-gray-700 pb-2">
                              <h3 className="text-xs font-bold uppercase text-blue-400">Capital Stack</h3>
                              <div className="text-[10px] text-gray-400">CLTV: <span className="text-white">{metrics.cltv}%</span></div>
                         </div>
-                        
                         {loans.map((loan, idx) => (
                             <div key={loan.id} className="bg-gray-900 p-2 rounded relative">
                                 <div className="flex justify-between items-center mb-2">
                                     <span className="text-xs font-bold text-gray-300">{loan.name}</span>
-                                    {loans.length > 1 && (
-                                        <button onClick={() => removeLoan(loan.id)} className="text-red-500 text-xs font-bold">X</button>
-                                    )}
+                                    {loans.length > 1 && (<button onClick={() => removeLoan(loan.id)} className="text-red-500 text-xs font-bold">X</button>)}
                                 </div>
                                 <div className="grid grid-cols-3 gap-2 text-xs">
-                                    <div>
-                                        <label className="text-gray-500 block">LTV %</label>
-                                        <input type="number" value={loan.ltv} onChange={(e) => updateLoan(loan.id, 'ltv', parseFloat(e.target.value))} className="w-full bg-gray-800 p-1 rounded"/>
-                                    </div>
-                                    <div>
-                                        <label className="text-gray-500 block">Rate %</label>
-                                        <input type="number" value={loan.rate} onChange={(e) => updateLoan(loan.id, 'rate', parseFloat(e.target.value))} className="w-full bg-gray-800 p-1 rounded"/>
-                                    </div>
-                                    <div className="flex items-center justify-center pt-4">
-                                        <label className="flex items-center cursor-pointer gap-2">
-                                            <input type="checkbox" checked={loan.isIO} onChange={(e) => updateLoan(loan.id, 'isIO', e.target.checked)} className="rounded bg-gray-700"/>
-                                            <span className="text-[10px] text-gray-400">IO Only</span>
-                                        </label>
-                                    </div>
+                                    <div><label className="text-gray-500 block">LTV %</label><input type="number" value={loan.ltv} onChange={(e) => updateLoan(loan.id, 'ltv', parseFloat(e.target.value))} className="w-full bg-gray-800 p-1 rounded"/></div>
+                                    <div><label className="text-gray-500 block">Rate %</label><input type="number" value={loan.rate} onChange={(e) => updateLoan(loan.id, 'rate', parseFloat(e.target.value))} className="w-full bg-gray-800 p-1 rounded"/></div>
+                                    <div className="flex items-center justify-center pt-4"><label className="flex items-center cursor-pointer gap-2"><input type="checkbox" checked={loan.isIO} onChange={(e) => updateLoan(loan.id, 'isIO', e.target.checked)} className="rounded bg-gray-700"/><span className="text-[10px] text-gray-400">IO Only</span></label></div>
                                 </div>
-                                {/* SLIDER FOR PRIMARY LOAN ONLY for Quick Adjust */}
-                                {idx === 0 && (
-                                    <div className="mt-2">
-                                        <input type="range" min="0" max="100" value={loan.ltv} onChange={(e) => updateLoan(loan.id, 'ltv', parseFloat(e.target.value))} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
-                                    </div>
-                                )}
+                                {idx === 0 && (<div className="mt-2"><input type="range" min="0" max="100" value={loan.ltv} onChange={(e) => updateLoan(loan.id, 'ltv', parseFloat(e.target.value))} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer" /></div>)}
                             </div>
                         ))}
-                        
-                        <button onClick={addLoan} className="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded text-xs font-bold text-gray-300">
-                            + Add Source
-                        </button>
+                        <button onClick={addLoan} className="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded text-xs font-bold text-gray-300">+ Add Source</button>
                     </div>
                     )}
 
-                    {/* RESIDENTIAL FIXED COSTS */}
+                    {/* RES FIXED COSTS */}
                     {calcMode !== 'cre' && (
                         <div className="grid grid-cols-3 gap-2">
                             <div><label className="text-gray-500 text-xs">Tax/Yr</label><input type="number" name="taxes" value={values.taxes} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>
@@ -542,6 +511,43 @@ const NapkinCalculator = () => {
                             <div><label className="text-gray-500 text-xs">HOA/Mo</label><input type="number" name="hoa" value={values.hoa} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>
                         </div>
                     )}
+
+                    {/* PARTNERSHIP SECTION (NEW) */}
+                    <div className="bg-gray-800 p-3 rounded-lg border border-purple-900/50">
+                        <div className="flex items-center justify-between mb-2">
+                             <h3 className="text-xs font-bold uppercase text-purple-400">Partnership Split</h3>
+                             <label className="flex items-center cursor-pointer relative"><input type="checkbox" checked={isPartnership} onChange={() => setIsPartnership(!isPartnership)} className="sr-only peer"/><div className="w-9 h-5 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600"></div></label>
+                        </div>
+                        
+                        {isPartnership && (
+                            <div className="space-y-4">
+                                <div>
+                                    <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Investor Ownership</span><span className="text-purple-400 font-bold">{values.investorEquity}%</span></div>
+                                    <input type="range" name="investorEquity" min="0" max="100" step="5" value={values.investorEquity} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
+                                    <div className="text-[10px] text-gray-500 text-right">You own {100-values.investorEquity}%</div>
+                                </div>
+                                <div>
+                                    <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Investor Capital</span><span className="text-green-400 font-bold">{values.investorCapital}%</span></div>
+                                    <input type="range" name="investorCapital" min="0" max="100" step="5" value={values.investorCapital} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
+                                    <div className="text-[10px] text-gray-500 text-right">You put {100-values.investorCapital}%</div>
+                                </div>
+                                
+                                <div className="grid grid-cols-2 gap-2 mt-2">
+                                    <div className="bg-gray-900 p-2 rounded text-center">
+                                        <div className="text-[10px] text-gray-400 uppercase">Investor CoC</div>
+                                        <div className="text-xl font-bold text-green-400">{metrics.investorCoc >= 9999 ? '∞' : metrics.investorCoc + '%'}</div>
+                                        <div className="text-[10px] text-gray-500">${metrics.investorFlow}/mo</div>
+                                    </div>
+                                    <div className="bg-gray-900 p-2 rounded text-center">
+                                        <div className="text-[10px] text-gray-400 uppercase">Sponsor CoC</div>
+                                        <div className="text-xl font-bold text-blue-400">{metrics.sponsorCoc >= 9999 ? '∞' : metrics.sponsorCoc + '%'}</div>
+                                        <div className="text-[10px] text-gray-500">${metrics.sponsorFlow}/mo</div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
                 </div>
 
                 <div className="fixed bottom-6 right-6 flex gap-3 z-40">
