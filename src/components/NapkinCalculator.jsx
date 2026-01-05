@@ -39,23 +39,28 @@ const NapkinCalculator = () => {
   const [feedbackText, setFeedbackText] = useState('');
   const fileInputRef = useRef(null);
 
-  // --- MODES ---
+  // --- MODES: 'standard', 'reverse', 'refi', 'cre' ---
   const [calcMode, setCalcMode] = useState('standard'); 
   const [isItemized, setIsItemized] = useState(false); 
 
   // --- DEFAULTS ---
   const [defaults, setDefaults] = useState({
-    downPaymentPercent: 20, interestRate: 7.5,
     taxes: 4500, insurance: 1200, hoa: 0,
-    targetDscr: 1.25, ltvRefi: 75,
+    targetDscr: 1.25,
     vacancy: 5, expenseRatio: 35, 
-    mgmt: 5, maint: 5, utils: 0
+    mgmt: 5, maint: 5, utils: 0,
+    primaryRate: 7.5, primaryLtv: 80
   });
+
+  // --- CAPITAL STACK STATE ---
+  // Replaces simple rate/down variables. Default is one Senior loan.
+  const [loans, setLoans] = useState([
+    { id: 1, name: 'Senior Debt', ltv: 80, rate: 7.5, isIO: false }
+  ]);
 
   const [values, setValues] = useState({
     address: '', notes: '',
     price: 350000, existingDebt: 0,
-    downPaymentPercent: 20, interestRate: 7.5, ltv: 75,
     rent: 3200, grossAnnual: 0, 
     taxes: 4500, insurance: 1200, hoa: 0,
     vacancy: 5, expenseRatio: 35,
@@ -64,9 +69,10 @@ const NapkinCalculator = () => {
   });
 
   const [metrics, setMetrics] = useState({ 
-    dscr: 0, cashFlow: 0, pitia: 0, loanAmount: 0, 
+    dscr: 0, cashFlow: 0, pitia: 0, totalLoanAmount: 0, 
     maxOffer: 0, cashOut: 0,
-    capRate: 0, noi: 0, coc: 0 
+    capRate: 0, noi: 0, coc: 0,
+    blendedRate: 0, cltv: 0
   });
 
   // --- INIT ---
@@ -75,11 +81,13 @@ const NapkinCalculator = () => {
     if (stored) {
         const p = JSON.parse(stored);
         setDefaults(p);
-        setValues(prev => ({ ...prev, ...p, ltv: p.ltvRefi }));
+        setValues(prev => ({ ...prev, ...p }));
+        // Reset stack to default if needed, or keep existing logic
+        setLoans([{ id: 1, name: 'Senior Debt', ltv: p.primaryLtv || 80, rate: p.primaryRate || 7.5, isIO: false }]);
     }
   }, []);
 
-  // Sync GrossAnnual with Rent initially
+  // Sync GrossAnnual
   useEffect(() => {
      if (values.grossAnnual === 0 && values.rent > 0) {
          setValues(prev => ({...prev, grossAnnual: prev.rent * 12}));
@@ -106,7 +114,6 @@ const NapkinCalculator = () => {
 
   const saveSettings = () => {
     localStorage.setItem('equicheck_defaults', JSON.stringify(defaults));
-    setValues(prev => ({ ...prev, ...defaults, ltv: defaults.ltvRefi }));
     setShowSettings(false);
   };
 
@@ -132,109 +139,126 @@ const NapkinCalculator = () => {
     r.readAsText(f);
   };
 
+  // --- LOAN MANAGEMENT ---
+  const updateLoan = (id, field, value) => {
+    setLoans(loans.map(l => l.id === id ? { ...l, [field]: value } : l));
+  };
+
+  const addLoan = () => {
+    const newId = loans.length > 0 ? Math.max(...loans.map(l => l.id)) + 1 : 1;
+    setLoans([...loans, { id: newId, name: 'Sub Debt', ltv: 10, rate: 10, isIO: true }]);
+  };
+
+  const removeLoan = (id) => {
+    if (loans.length === 1) return; // Must have at least 1
+    setLoans(loans.filter(l => l.id !== id));
+  };
+
   // --- CORE MATH ENGINE ---
   useEffect(() => {
-    // SAFE PARSER: Converts "" to 0 for math, but keeps state clean
     const v = (key) => (values[key] === '' || values[key] === undefined) ? 0 : parseFloat(values[key]);
-
-    const interestRate = v('interestRate');
-    const monthlyRate = interestRate / 100 / 12;
-    const n = 30 * 12;
-    
-    // Inputs
     const price = v('price');
-    const downPaymentPercent = v('downPaymentPercent');
-    const existingDebt = v('existingDebt');
-    const taxes = v('taxes');
-    const insurance = v('insurance');
-    const hoa = v('hoa');
-    const targetDscr = v('targetDscr') || 1; // Prevent div by zero
     
     // Income
-    const rent = v('rent');
-    const grossAnnual = v('grossAnnual');
-    const monthlyGross = calcMode === 'cre' ? (grossAnnual / 12) : rent;
+    const monthlyGross = calcMode === 'cre' ? (v('grossAnnual') / 12) : v('rent');
     
-    // --- EXPENSES ---
+    // Expenses
     let monthlyExpenses = 0;
-    let fixedCosts = 0; // Tax/Ins/HOA
+    let fixedCosts = (v('taxes') / 12) + (v('insurance') / 12) + v('hoa');
 
     if (calcMode === 'cre') {
         const vacancyLoss = monthlyGross * (v('vacancy') / 100);
-        
         if (isItemized) {
-            const mTax = taxes / 12;
-            const mIns = insurance / 12;
-            const mMgmt = monthlyGross * (v('mgmt') / 100);
-            const mMaint = monthlyGross * (v('maint') / 100);
-            const mUtil = v('utils');
-            monthlyExpenses = mTax + mIns + mMgmt + mMaint + mUtil + vacancyLoss;
+            monthlyExpenses = (v('taxes')/12) + (v('insurance')/12) + (monthlyGross * (v('mgmt')/100)) + (monthlyGross * (v('maint')/100)) + v('utils') + vacancyLoss;
         } else {
-            // Expense Ratio
             monthlyExpenses = monthlyGross * (v('expenseRatio') / 100);
         }
     } else {
-        // Residential
-        fixedCosts = (taxes / 12) + (insurance / 12) + hoa;
         monthlyExpenses = fixedCosts;
     }
 
-    let dscr=0, cashFlow=0, pitia=0, loanAmount=0, maxOffer=0, cashOut=0, capRate=0, noi=0, coc=0;
+    let dscr=0, cashFlow=0, pitia=0, totalLoanAmount=0, maxOffer=0, cashOut=0, capRate=0, noi=0, coc=0, totalDebtService=0, blendedRate=0;
 
-    // --- DEBT SERVICE ---
+    // --- DEBT CALCULATION (CAPITAL STACK) ---
     if (calcMode === 'reverse') {
-        const maxPitia = monthlyGross / targetDscr;
-        const maxMortgage = maxPitia - fixedCosts;
-        if (maxMortgage > 0) {
-            loanAmount = maxMortgage * (1 - Math.pow(1 + monthlyRate, -n)) / monthlyRate;
-            maxOffer = loanAmount / ((100 - downPaymentPercent) / 100);
+        // Reverse Mode Simplification: Uses ONLY the Primary Loan logic (1st in stack)
+        const primary = loans[0];
+        const mRate = primary.rate / 100 / 12;
+        const n = 30 * 12;
+        const maxPitia = monthlyGross / v('targetDscr');
+        const maxDebtPayment = maxPitia - fixedCosts;
+        
+        if (maxDebtPayment > 0) {
+            // Solve based on Amortization or IO of primary loan
+            let calculatedLoan = 0;
+            if (primary.isIO) {
+                calculatedLoan = maxDebtPayment / mRate;
+            } else {
+                calculatedLoan = maxDebtPayment * (1 - Math.pow(1 + mRate, -n)) / mRate;
+            }
+            maxOffer = calculatedLoan / (primary.ltv / 100); // Assuming LTV implies "Loan-to-MaxPrice" here
             pitia = maxPitia;
-            dscr = targetDscr;
+            dscr = v('targetDscr');
             cashFlow = monthlyGross - pitia;
         }
     } else {
-        const ltvCalc = calcMode === 'refi' ? v('ltv') : (100 - downPaymentPercent);
-        loanAmount = price * (ltvCalc / 100);
-        
-        // Mortgage Calc
-        const mortgage = monthlyRate > 0 
-            ? loanAmount * (monthlyRate * Math.pow(1 + monthlyRate, n)) / (Math.pow(1 + monthlyRate, n) - 1)
-            : loanAmount / n; // fallback if rate is 0
+        // Standard, Refi, CRE - Use Full Capital Stack
+        let weightedRateSum = 0;
 
-        const totalOutflow = mortgage + monthlyExpenses;
-        
+        loans.forEach(loan => {
+            const amt = price * (loan.ltv / 100);
+            totalLoanAmount += amt;
+            weightedRateSum += (amt * loan.rate);
+
+            // Payment Calc
+            const r = loan.rate / 100 / 12;
+            let pmt = 0;
+            if (loan.isIO) {
+                pmt = amt * r;
+            } else {
+                const n = 30 * 12;
+                pmt = r > 0 ? amt * (r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1) : 0;
+            }
+            totalDebtService += pmt;
+        });
+
+        // Blended Rate
+        blendedRate = totalLoanAmount > 0 ? (weightedRateSum / totalLoanAmount) : 0;
+
+        const totalOutflow = totalDebtService + monthlyExpenses;
         pitia = totalOutflow;
         cashFlow = monthlyGross - totalOutflow;
         dscr = totalOutflow > 0 ? monthlyGross / totalOutflow : 0;
-        
-        if (calcMode === 'refi') cashOut = loanAmount - existingDebt;
-        
-        // CRE Metrics
-        // NOI = Gross - Operating Expenses (No Debt)
-        // Note: monthlyExpenses includes Tax/Ins/Maint/Mgmt/Vacancy
-        noi = (monthlyGross - monthlyExpenses) * 12; 
+
+        if (calcMode === 'refi') cashOut = totalLoanAmount - v('existingDebt');
+
+        // Metrics
+        noi = (monthlyGross - monthlyExpenses) * 12;
         capRate = price > 0 ? (noi / price) * 100 : 0;
         
-        const cashInvested = (price * (downPaymentPercent/100)); 
-        coc = cashInvested > 0 ? ((cashFlow * 12) / cashInvested) * 100 : 0;
+        // Cash Invested = Price - Total Loans
+        const cashInvested = price - totalLoanAmount; 
+        coc = cashInvested > 0 ? ((cashFlow * 12) / cashInvested) * 100 : 0; // Infinite if 0 down
     }
 
     setMetrics({ 
         dscr: parseFloat(dscr.toFixed(2)), 
         cashFlow: Math.round(cashFlow), 
-        pitia: Math.round(pitia),
-        loanAmount: Math.round(loanAmount),
-        maxOffer: Math.round(maxOffer),
+        pitia: Math.round(pitia), 
+        totalLoanAmount: Math.round(totalLoanAmount),
+        maxOffer: Math.round(maxOffer), 
         cashOut: Math.round(cashOut),
-        capRate: parseFloat(capRate.toFixed(2)),
-        noi: Math.round(noi),
-        coc: parseFloat(coc.toFixed(2))
+        capRate: parseFloat(capRate.toFixed(2)), 
+        noi: Math.round(noi), 
+        coc: parseFloat(coc.toFixed(2)),
+        blendedRate: parseFloat(blendedRate.toFixed(3)),
+        cltv: loans.reduce((sum, l) => sum + l.ltv, 0)
     });
-  }, [values, calcMode, isItemized]);
+
+  }, [values, calcMode, isItemized, loans]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    // Allow empty string to exist in state (for backspacing), parse numbers otherwise
     const finalVal = (name === 'address' || name === 'notes') ? value : (value === '' ? '' : parseFloat(value));
     setValues({ ...values, [name]: finalVal });
   };
@@ -283,16 +307,23 @@ const NapkinCalculator = () => {
          doc.text("TARGET DSCR", 25, yPos + 5); doc.text("MAX OFFER PRICE", 85, yPos + 5);
          doc.setTextColor(0, 0, 255); doc.text(metrics.dscr.toString(), 25, yPos + 15);
          doc.setTextColor(0, 150, 0); doc.text(`$${metrics.maxOffer.toLocaleString()}`, 85, yPos + 15);
-    } else if (calcMode === 'refi') {
-         doc.text("NEW DSCR", 25, yPos + 5); doc.text("CASH OUT", 85, yPos + 5);
-         doc.setTextColor(0, 0, 255); doc.text(metrics.dscr.toString(), 25, yPos + 15);
-         doc.setTextColor(metrics.cashOut >= 0 ? 0 : 200, metrics.cashOut >= 0 ? 150 : 0, 0); 
-         doc.text(`$${metrics.cashOut.toLocaleString()}`, 85, yPos + 15);
     } else {
          doc.text("DSCR SCORE", 25, yPos + 5); doc.text("CASH FLOW", 85, yPos + 5);
          doc.setTextColor(0, 0, 255); doc.text(metrics.dscr.toString(), 25, yPos + 15);
          doc.setTextColor(0, 150, 0); doc.text(`$${metrics.cashFlow}`, 85, yPos + 15);
     }
+    
+    // Capital Stack Detail in PDF
+    yPos += 45;
+    doc.setTextColor(0); doc.setFontSize(12);
+    doc.text("Capital Stack", 20, yPos); yPos += 10;
+    doc.setFontSize(10);
+    loans.forEach(l => {
+        doc.text(`${l.name}: ${l.ltv}% LTV @ ${l.rate}% ${l.isIO ? '(IO)' : ''}`, 20, yPos);
+        yPos += 6;
+    });
+    doc.text(`Blended Rate: ${metrics.blendedRate}% | CLTV: ${metrics.cltv}%`, 20, yPos + 2);
+    yPos += 10;
     
     doc.save(`${values.address.replace(/\s+/g, '_')}_EquiCheck.pdf`);
   };
@@ -303,7 +334,7 @@ const NapkinCalculator = () => {
         const finalPrice = calcMode === 'reverse' ? metrics.maxOffer : values.price;
         await db.properties.add({
             address: values.address, price: finalPrice, rent: values.rent, dscr: metrics.dscr,
-            images: images, notes: values.notes, fullData: values, created: new Date()
+            images: images, notes: values.notes, fullData: values, loans: loans, created: new Date()
         });
         alert("Saved!");
     } catch (e) { console.error(e); }
@@ -311,6 +342,7 @@ const NapkinCalculator = () => {
 
   const loadProperty = (prop) => {
     setValues({ ...prop.fullData, notes: prop.fullData.notes || '' });
+    if(prop.loans) setLoans(prop.loans);
     setImages(prop.images || []); setCalcMode('standard'); setShowHistory(false);
   };
 
@@ -338,12 +370,10 @@ const NapkinCalculator = () => {
             <div className="bg-gray-800 p-6 rounded-lg w-full max-w-sm border border-gray-600 max-h-[80vh] overflow-y-auto">
                 <h3 className="text-xl font-bold mb-4">Global Defaults</h3>
                 <div className="space-y-3 text-sm">
-                    <div><label className="text-gray-400">Rate (%)</label><input type="number" name="interestRate" value={defaults.interestRate} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
-                    <div><label className="text-gray-400">Down %</label><input type="number" name="downPaymentPercent" value={defaults.downPaymentPercent} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
-                    <div><label className="text-gray-400">Refi LTV %</label><input type="number" name="ltvRefi" value={defaults.ltvRefi} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
+                    <div><label className="text-gray-400">Primary Rate (%)</label><input type="number" name="primaryRate" value={defaults.primaryRate} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
+                    <div><label className="text-gray-400">Primary LTV %</label><input type="number" name="primaryLtv" value={defaults.primaryLtv} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
                     <div className="pt-2 border-t border-gray-700 font-bold text-gray-500">CRE Defaults</div>
                     <div><label className="text-gray-400">Expense Ratio (%)</label><input type="number" name="expenseRatio" value={defaults.expenseRatio} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
-                    <div><label className="text-gray-400">Vacancy (%)</label><input type="number" name="vacancy" value={defaults.vacancy} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
                 </div>
                 <div className="flex justify-end gap-3 mt-6"><button onClick={() => setShowSettings(false)} className="text-gray-400">Cancel</button><button onClick={saveSettings} className="bg-blue-600 px-4 py-2 rounded font-bold">Save Defaults</button></div>
             </div>
@@ -414,14 +444,16 @@ const NapkinCalculator = () => {
                     <div className="flex gap-2 overflow-x-auto">{images.map((imgSrc, idx) => (<div key={idx} className="relative flex-shrink-0"><img src={imgSrc} alt="Prop" className="h-16 w-16 object-cover rounded" /><button onClick={() => removeImage(idx)} className="absolute -top-1 -right-1 bg-red-600 rounded-full w-4 h-4 flex items-center justify-center text-[10px]">x</button></div>))}</div>
                 </div>
 
-                {/* DYNAMIC INPUTS */}
+                {/* INPUTS */}
                 <div className="space-y-4 text-sm mb-20">
                     <div className="grid grid-cols-2 gap-4">
+                        {/* Price Fields */}
                         {calcMode === 'standard' && <div><label className="text-gray-500">Price</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
                         {calcMode === 'reverse' && <div><label className="text-blue-400 font-bold">Target DSCR</label><input type="number" name="targetDscr" value={values.targetDscr} onChange={handleChange} className="w-full bg-gray-800 border border-blue-500 p-2 rounded"/></div>}
                         {calcMode === 'refi' && <div><label className="text-purple-400 font-bold">Appraised Value</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 border border-purple-500 p-2 rounded"/></div>}
                         {calcMode === 'cre' && <div><label className="text-gray-500">Price</label><input type="number" name="price" value={values.price} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
                         
+                        {/* Income Fields */}
                         {calcMode === 'cre' ? (
                              <div><label className="text-green-400 font-bold">Gross Annual Inc</label><input type="number" name="grossAnnual" value={values.grossAnnual} onChange={handleChange} className="w-full bg-gray-800 border border-green-500 p-2 rounded"/></div>
                         ) : (
@@ -430,27 +462,19 @@ const NapkinCalculator = () => {
                     </div>
                     {calcMode === 'refi' && <div><label className="text-gray-500">Existing Debt</label><input type="number" name="existingDebt" value={values.existingDebt} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
 
-                    {/* CRE EXPENSE LOGIC */}
+                    {/* CRE EXPENSES */}
                     {calcMode === 'cre' && (
                         <div className="bg-gray-800 p-3 rounded-lg space-y-4 border border-gray-700">
                              <div className="flex items-center justify-between mb-2">
                                 <label className="text-xs font-bold uppercase text-gray-400">Expenses</label>
-                                <button onClick={() => setIsItemized(!isItemized)} className="text-[10px] bg-gray-700 px-2 py-1 rounded hover:bg-gray-600">
-                                    {isItemized ? 'Switch to Ratio' : 'Switch to Itemized'}
-                                </button>
+                                <button onClick={() => setIsItemized(!isItemized)} className="text-[10px] bg-gray-700 px-2 py-1 rounded hover:bg-gray-600">{isItemized ? 'Switch to Ratio' : 'Switch to Itemized'}</button>
                              </div>
-                             
-                             {/* VACANCY SLIDER */}
                              <div>
                                 <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Vacancy</span><span className="text-yellow-400 font-bold">{values.vacancy}%</span></div>
                                 <input type="range" name="vacancy" min="0" max="20" step="1" value={values.vacancy} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
                              </div>
-
                              {!isItemized ? (
-                                <div>
-                                    <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Expense Ratio</span><span className="text-red-400 font-bold">{values.expenseRatio}%</span></div>
-                                    <input type="range" name="expenseRatio" min="10" max="60" step="1" value={values.expenseRatio} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
-                                </div>
+                                <div><div className="flex justify-between text-xs text-gray-400 mb-1"><span>Expense Ratio</span><span className="text-red-400 font-bold">{values.expenseRatio}%</span></div><input type="range" name="expenseRatio" min="10" max="60" step="1" value={values.expenseRatio} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" /></div>
                              ) : (
                                 <div className="grid grid-cols-3 gap-2">
                                     <div><label className="text-gray-500 text-xs">Mgmt %</label><input type="number" name="mgmt" value={values.mgmt} onChange={handleChange} className="w-full bg-gray-900 p-1 rounded"/></div>
@@ -463,25 +487,52 @@ const NapkinCalculator = () => {
                         </div>
                     )}
 
-                    {/* SLIDERS (Rate/Down/LTV) */}
-                    <div className="bg-gray-800 p-3 rounded-lg space-y-4">
-                        <div>
-                            <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Interest Rate</span><span className="text-blue-400 font-bold">{values.interestRate === '' ? 0 : parseFloat(values.interestRate).toFixed(3)}%</span></div>
-                            <input type="range" name="interestRate" min="3" max="10" step="0.125" value={values.interestRate} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
+                    {/* CAPITAL STACK (DYNAMIC DEBT) */}
+                    {calcMode !== 'reverse' && (
+                    <div className="bg-gray-800 p-3 rounded-lg space-y-4 border border-blue-900/50">
+                        <div className="flex justify-between items-center border-b border-gray-700 pb-2">
+                             <h3 className="text-xs font-bold uppercase text-blue-400">Capital Stack</h3>
+                             <div className="text-[10px] text-gray-400">CLTV: <span className="text-white">{metrics.cltv}%</span></div>
                         </div>
-                        {calcMode !== 'refi' && (
-                            <div>
-                                <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Down Payment</span><span className="text-blue-400 font-bold">{values.downPaymentPercent}%</span></div>
-                                <input type="range" name="downPaymentPercent" min="0" max="50" step="5" value={values.downPaymentPercent} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
+                        
+                        {loans.map((loan, idx) => (
+                            <div key={loan.id} className="bg-gray-900 p-2 rounded relative">
+                                <div className="flex justify-between items-center mb-2">
+                                    <span className="text-xs font-bold text-gray-300">{loan.name}</span>
+                                    {loans.length > 1 && (
+                                        <button onClick={() => removeLoan(loan.id)} className="text-red-500 text-xs font-bold">X</button>
+                                    )}
+                                </div>
+                                <div className="grid grid-cols-3 gap-2 text-xs">
+                                    <div>
+                                        <label className="text-gray-500 block">LTV %</label>
+                                        <input type="number" value={loan.ltv} onChange={(e) => updateLoan(loan.id, 'ltv', parseFloat(e.target.value))} className="w-full bg-gray-800 p-1 rounded"/>
+                                    </div>
+                                    <div>
+                                        <label className="text-gray-500 block">Rate %</label>
+                                        <input type="number" value={loan.rate} onChange={(e) => updateLoan(loan.id, 'rate', parseFloat(e.target.value))} className="w-full bg-gray-800 p-1 rounded"/>
+                                    </div>
+                                    <div className="flex items-center justify-center pt-4">
+                                        <label className="flex items-center cursor-pointer gap-2">
+                                            <input type="checkbox" checked={loan.isIO} onChange={(e) => updateLoan(loan.id, 'isIO', e.target.checked)} className="rounded bg-gray-700"/>
+                                            <span className="text-[10px] text-gray-400">IO Only</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                {/* SLIDER FOR PRIMARY LOAN ONLY for Quick Adjust */}
+                                {idx === 0 && (
+                                    <div className="mt-2">
+                                        <input type="range" min="0" max="100" value={loan.ltv} onChange={(e) => updateLoan(loan.id, 'ltv', parseFloat(e.target.value))} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
+                                    </div>
+                                )}
                             </div>
-                        )}
-                        {calcMode === 'refi' && (
-                            <div>
-                                <div className="flex justify-between text-xs text-gray-400 mb-1"><span>New Loan LTV</span><span className="text-purple-400 font-bold">{values.ltv}%</span></div>
-                                <input type="range" name="ltv" min="50" max="85" step="5" value={values.ltv} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
-                            </div>
-                        )}
+                        ))}
+                        
+                        <button onClick={addLoan} className="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded text-xs font-bold text-gray-300">
+                            + Add Source
+                        </button>
                     </div>
+                    )}
 
                     {/* RESIDENTIAL FIXED COSTS */}
                     {calcMode !== 'cre' && (
