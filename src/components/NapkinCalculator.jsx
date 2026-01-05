@@ -26,7 +26,6 @@ const loadImageForPDF = (url) => {
     });
 };
 
-// Debounce helper
 const useDebounce = (value, delay) => {
   const [debouncedValue, setDebouncedValue] = useState(value);
   useEffect(() => {
@@ -50,10 +49,9 @@ const NapkinCalculator = () => {
   const fileInputRef = useRef(null);
   const [isLoadingData, setIsLoadingData] = useState(false); 
 
-  // Autocomplete State
+  // Autocomplete
   const [suggestions, setSuggestions] = useState([]);
   const [showDropdown, setShowDropdown] = useState(false);
-  // Default to US Center, update with GPS if available
   const [userLocation, setUserLocation] = useState({ lat: 39.5, lon: -98.35 }); 
 
   // --- MODES ---
@@ -67,6 +65,7 @@ const NapkinCalculator = () => {
     targetDscr: 1.25, vacancy: 5, expenseRatio: 35, 
     mgmt: 5, maint: 5, utils: 0,
     primaryRate: 7.5, primaryLtv: 80,
+    closingCosts: 3, // % Default
     rentCastKey: ''
   });
 
@@ -83,7 +82,9 @@ const NapkinCalculator = () => {
     vacancy: 5, expenseRatio: 35,
     mgmt: 5, maint: 5, utils: 0,
     targetDscr: 1.25,
-    investorEquity: 50, investorCapital: 100 
+    investorEquity: 50, investorCapital: 100,
+    // NEW: Project Costs
+    rehab: 0, closingCosts: 3
   });
 
   const [metrics, setMetrics] = useState({ 
@@ -91,14 +92,14 @@ const NapkinCalculator = () => {
     maxOffer: 0, cashOut: 0,
     capRate: 0, noi: 0, coc: 0,
     blendedRate: 0, cltv: 0,
-    investorFlow: 0, sponsorFlow: 0, investorCoc: 0, sponsorCoc: 0
+    investorFlow: 0, sponsorFlow: 0, investorCoc: 0, sponsorCoc: 0,
+    totalEntryFee: 0 // New metric
   });
 
   const debouncedAddress = useDebounce(values.address, 300);
 
-  // --- INIT: GET GPS LOCATION ---
+  // --- INIT ---
   useEffect(() => {
-    // 1. Load Defaults
     const stored = localStorage.getItem('equicheck_defaults');
     if (stored) {
         const p = JSON.parse(stored);
@@ -106,166 +107,76 @@ const NapkinCalculator = () => {
         setValues(prev => ({ ...prev, ...p }));
         setLoans([{ id: 1, name: 'Senior Debt', ltv: p.primaryLtv || 80, rate: p.primaryRate || 7.5, isIO: false }]);
     }
-    
-    // 2. Get User Location for Better Autocomplete
     if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
             (pos) => setUserLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
-            (err) => console.log("GPS denied, using US Center"),
-            { enableHighAccuracy: false, timeout: 5000 }
+            (err) => console.log("GPS denied"), { enableHighAccuracy: false, timeout: 5000 }
         );
     }
   }, []);
 
   useEffect(() => {
-     if (values.grossAnnual === 0 && values.rent > 0) {
-         setValues(prev => ({...prev, grossAnnual: prev.rent * 12}));
-     }
+     if (values.grossAnnual === 0 && values.rent > 0) setValues(prev => ({...prev, grossAnnual: prev.rent * 12}));
   }, []);
 
-  // --- AUTOCOMPLETE FETCH (With Logic) ---
+  // --- AUTOCOMPLETE ---
   useEffect(() => {
     if (debouncedAddress.length > 2 && showDropdown) {
-        // STRATEGY: Strip unit numbers (Apt, Unit, #) because geocoders hate them
         const cleanQuery = debouncedAddress.replace(/(\s+#\w+)|(\s+(apt|unit|ste)\s+\w+)/gi, '');
-
         fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(cleanQuery)}&limit=5&lat=${userLocation.lat}&lon=${userLocation.lon}`) 
-        .then(res => res.json())
-        .then(data => {
-            setSuggestions(data.features);
-        })
-        .catch(err => console.error(err));
-    } else {
-        setSuggestions([]);
-    }
+        .then(res => res.json()).then(data => setSuggestions(data.features)).catch(console.error);
+    } else setSuggestions([]);
   }, [debouncedAddress, showDropdown, userLocation]);
 
-  // --- RENTCAST DATA FETCH ---
   const fetchPropertyData = async (selectedAddress) => {
     if (!defaults.rentCastKey) return; 
     setIsLoadingData(true);
-    
     try {
-        const response = await fetch(`https://api.rentcast.io/v1/properties?address=${encodeURIComponent(selectedAddress)}`, {
-            headers: { 'X-Api-Key': defaults.rentCastKey }
-        });
-        
+        const response = await fetch(`https://api.rentcast.io/v1/properties?address=${encodeURIComponent(selectedAddress)}`, { headers: { 'X-Api-Key': defaults.rentCastKey } });
         const data = await response.json();
-        
         if (data && data.length > 0) {
             const prop = data[0];
             const newValues = { ...values, address: selectedAddress };
-            
             if (prop.price) newValues.price = prop.price;
             else if (prop.lastSalePrice) newValues.price = prop.lastSalePrice;
-
-            if (prop.rent) {
-                newValues.rent = prop.rent;
-                newValues.grossAnnual = prop.rent * 12;
-            }
-
+            if (prop.rent) { newValues.rent = prop.rent; newValues.grossAnnual = prop.rent * 12; }
             if (prop.lastTaxAmount) newValues.taxes = prop.lastTaxAmount;
-            
             const details = `\n[Auto-Fill Data]\nBeds: ${prop.bedrooms || '?'} | Baths: ${prop.bathrooms || '?'}\nSqFt: ${prop.squareFootage || '?'}\nBuilt: ${prop.yearBuilt || '?'}`;
             newValues.notes = (newValues.notes || '') + details;
-
             setValues(newValues);
         }
-    } catch (error) {
-        console.error("RentCast Error:", error);
-        alert("Could not fetch property data. Check API Key.");
-    } finally {
-        setIsLoadingData(false);
-    }
+    } catch (error) { alert("Could not fetch property data."); } finally { setIsLoadingData(false); }
   };
 
   const handleAddressSelect = (feature) => {
     const p = feature.properties;
     const fullAddr = `${p.housenumber || ''} ${p.street || ''}, ${p.city || ''}, ${p.state || ''} ${p.postcode || ''}`.trim().replace(/^ ,/, '');
-    
     setValues(prev => ({ ...prev, address: fullAddr }));
     setShowDropdown(false);
     fetchPropertyData(fullAddr);
   };
 
-  const handleManualAddressChange = (e) => {
-      setValues({ ...values, address: e.target.value });
-      setShowDropdown(true);
-  };
-
-  // --- LISTENERS ---
-  useEffect(() => {
-    const h = (e) => { e.preventDefault(); setInstallPrompt(e); };
-    window.addEventListener('beforeinstallprompt', h);
-    return () => window.removeEventListener('beforeinstallprompt', h);
-  }, []);
-
-  const handleInstallClick = () => {
-    if (!installPrompt) return;
-    installPrompt.prompt();
-    installPrompt.userChoice.then((r) => { if (r.outcome === 'accepted') setInstallPrompt(null); });
-  };
-
-  const handleSendFeedback = () => {
-    window.location.href = `mailto:kyle@adynton.com?subject=EquiCheck%20Feedback&body=${encodeURIComponent(feedbackText)}`;
-    setShowFeedback(false); setFeedbackText('');
-  };
-
-  const saveSettings = () => {
-    localStorage.setItem('equicheck_defaults', JSON.stringify(defaults));
-    setShowSettings(false);
-  };
-
-  const handleBackup = async () => {
-    try {
-        const d = await db.properties.toArray();
-        const b = new Blob([JSON.stringify(d)], {type: "application/json"});
-        const l = document.createElement('a');
-        l.href = URL.createObjectURL(b);
-        l.download = `EquiCheck_Backup_${new Date().toISOString().slice(0,10)}.json`;
-        l.click();
-    } catch (e) { alert("Backup failed: " + e.message); }
-  };
-
-  const handleRestore = async (e) => {
-    const f = e.target.files[0];
-    if (!f || !window.confirm("Overwrite current data?")) return;
-    const r = new FileReader();
-    r.onload = async (ev) => {
-        try { await db.properties.clear(); await db.properties.bulkAdd(JSON.parse(ev.target.result)); alert("Restored!"); } 
-        catch { alert("Invalid file."); }
-    };
-    r.readAsText(f);
-  };
-
-  // --- LOAN MANAGEMENT ---
-  const updateLoan = (id, field, value) => setLoans(loans.map(l => l.id === id ? { ...l, [field]: value } : l));
-  const addLoan = () => setLoans([...loans, { id: loans.length > 0 ? Math.max(...loans.map(l => l.id)) + 1 : 1, name: 'Sub Debt', ltv: 10, rate: 10, isIO: true }]);
-  const removeLoan = (id) => { if (loans.length > 1) setLoans(loans.filter(l => l.id !== id)); };
-
-  // --- CORE MATH ENGINE ---
+  // --- CORE MATH ---
   useEffect(() => {
     const v = (key) => (values[key] === '' || values[key] === undefined) ? 0 : parseFloat(values[key]);
     const price = v('price');
     const monthlyGross = calcMode === 'cre' ? (v('grossAnnual') / 12) : v('rent');
+    const rehab = v('rehab');
+    const closingCostsVal = price * (v('closingCosts') / 100);
     
+    // Expenses
     let monthlyExpenses = 0;
     let fixedCosts = (v('taxes') / 12) + (v('insurance') / 12) + v('hoa');
 
     if (calcMode === 'cre') {
         const vacancyLoss = monthlyGross * (v('vacancy') / 100);
-        if (isItemized) {
-            monthlyExpenses = (v('taxes')/12) + (v('insurance')/12) + (monthlyGross * (v('mgmt')/100)) + (monthlyGross * (v('maint')/100)) + v('utils') + vacancyLoss;
-        } else {
-            monthlyExpenses = monthlyGross * (v('expenseRatio') / 100);
-        }
-    } else {
-        monthlyExpenses = fixedCosts;
-    }
+        if (isItemized) monthlyExpenses = (v('taxes')/12) + (v('insurance')/12) + (monthlyGross * (v('mgmt')/100)) + (monthlyGross * (v('maint')/100)) + v('utils') + vacancyLoss;
+        else monthlyExpenses = monthlyGross * (v('expenseRatio') / 100);
+    } else monthlyExpenses = fixedCosts;
 
     let dscr=0, cashFlow=0, pitia=0, totalLoanAmount=0, maxOffer=0, cashOut=0, capRate=0, noi=0, coc=0, totalDebtService=0, blendedRate=0;
 
-    // DEBT CALC
+    // Debt
     if (calcMode === 'reverse') {
         const primary = loans[0];
         const mRate = primary.rate / 100 / 12;
@@ -301,39 +212,45 @@ const NapkinCalculator = () => {
         cashFlow = monthlyGross - totalOutflow;
         dscr = totalOutflow > 0 ? monthlyGross / totalOutflow : 0;
 
-        if (calcMode === 'refi') cashOut = totalLoanAmount - v('existingDebt');
+        if (calcMode === 'refi') {
+            // Refi Cash Out: New Loan - Existing Debt - Closing Costs
+            // Rehab is assumed sunk cost or separate in Refi context for simplicity
+            cashOut = totalLoanAmount - v('existingDebt') - closingCostsVal;
+        }
 
         noi = (monthlyGross - monthlyExpenses) * 12;
         capRate = price > 0 ? (noi / price) * 100 : 0;
-        const cashInvested = price - totalLoanAmount; 
-        coc = cashInvested > 0 ? ((cashFlow * 12) / cashInvested) * 100 : 0;
+        
+        // --- TOTAL ENTRY FEE (CASH NEEDED) ---
+        // Down Payment (Price - Loans) + Rehab + Closing Costs
+        const downPayment = Math.max(0, price - totalLoanAmount);
+        const totalEntryFee = downPayment + rehab + closingCostsVal;
+        
+        // CoC Return
+        coc = totalEntryFee > 0 ? ((cashFlow * 12) / totalEntryFee) * 100 : 0;
     }
 
-    // PARTNERSHIP
-    const totalCashRequired = Math.max(0, price - totalLoanAmount);
-    const investorCashIn = totalCashRequired * (v('investorCapital') / 100);
+    // Partnership
+    // Base math on Total Entry Fee (Cash to Close)
+    const downPayment = Math.max(0, price - totalLoanAmount);
+    const totalEntryFee = downPayment + rehab + closingCostsVal;
+
+    const investorCashIn = totalEntryFee * (v('investorCapital') / 100);
     const investorFlow = cashFlow * (v('investorEquity') / 100);
     const investorCoc = investorCashIn > 0 ? ((investorFlow * 12) / investorCashIn) * 100 : (investorFlow > 0 ? 9999 : 0);
-    const sponsorCashIn = totalCashRequired * ((100 - v('investorCapital')) / 100);
+    
+    const sponsorCashIn = totalEntryFee * ((100 - v('investorCapital')) / 100);
     const sponsorFlow = cashFlow * ((100 - v('investorEquity')) / 100);
     const sponsorCoc = sponsorCashIn > 0 ? ((sponsorFlow * 12) / sponsorCashIn) * 100 : (sponsorFlow > 0 ? 9999 : 0);
 
     setMetrics({ 
-        dscr: parseFloat(dscr.toFixed(2)), 
-        cashFlow: Math.round(cashFlow), 
-        pitia: Math.round(pitia), 
-        totalLoanAmount: Math.round(totalLoanAmount), 
-        maxOffer: Math.round(maxOffer), 
-        cashOut: Math.round(cashOut),
-        capRate: parseFloat(capRate.toFixed(2)), 
-        noi: Math.round(noi), 
-        coc: parseFloat(coc.toFixed(2)),
-        blendedRate: parseFloat(blendedRate.toFixed(3)),
-        cltv: loans.reduce((sum, l) => sum + l.ltv, 0),
-        investorFlow: Math.round(investorFlow),
-        sponsorFlow: Math.round(sponsorFlow),
-        investorCoc: parseFloat(investorCoc.toFixed(1)),
-        sponsorCoc: parseFloat(sponsorCoc.toFixed(1))
+        dscr: parseFloat(dscr.toFixed(2)), cashFlow: Math.round(cashFlow), pitia: Math.round(pitia), 
+        totalLoanAmount: Math.round(totalLoanAmount), maxOffer: Math.round(maxOffer), cashOut: Math.round(cashOut),
+        capRate: parseFloat(capRate.toFixed(2)), noi: Math.round(noi), coc: parseFloat(coc.toFixed(2)),
+        blendedRate: parseFloat(blendedRate.toFixed(3)), cltv: loans.reduce((sum, l) => sum + l.ltv, 0),
+        investorFlow: Math.round(investorFlow), sponsorFlow: Math.round(sponsorFlow),
+        investorCoc: parseFloat(investorCoc.toFixed(1)), sponsorCoc: parseFloat(sponsorCoc.toFixed(1)),
+        totalEntryFee: Math.round(totalEntryFee)
     });
 
   }, [values, calcMode, isItemized, loans]);
@@ -343,20 +260,16 @@ const NapkinCalculator = () => {
     const finalVal = (name === 'address' || name === 'notes' || name === 'rentCastKey') ? value : (value === '' ? '' : parseFloat(value));
     setValues({ ...values, [name]: finalVal });
   };
+  const handleDefaultChange = (e) => setDefaults({ ...defaults, [e.target.name]: e.target.value === '' ? '' : parseFloat(e.target.value) });
+  const updateLoan = (id, field, value) => setLoans(loans.map(l => l.id === id ? { ...l, [field]: value } : l));
+  const addLoan = () => setLoans([...loans, { id: loans.length > 0 ? Math.max(...loans.map(l => l.id)) + 1 : 1, name: 'Sub Debt', ltv: 10, rate: 10, isIO: true }]);
+  const removeLoan = (id) => { if (loans.length > 1) setLoans(loans.filter(l => l.id !== id)); };
   
-  const handleDefaultChange = (e) => {
-    const { name, value } = e.target;
-    const finalVal = (name === 'rentCastKey') ? value : (value === '' ? '' : parseFloat(value));
-    setDefaults({ ...defaults, [name]: finalVal });
-  };
-
   const handlePhotoCapture = async (e) => {
     if (e.target.files && e.target.files[0]) {
       setIsCompressing(true);
-      const file = e.target.files[0];
-      const compressedBase64 = await compressImage(file);
-      setImages([...images, compressedBase64]);
-      setIsCompressing(false);
+      const compressedBase64 = await compressImage(e.target.files[0]);
+      setImages([...images, compressedBase64]); setIsCompressing(false);
     }
   };
   const removeImage = (idx) => setImages(images.filter((_, i) => i !== idx));
@@ -391,13 +304,23 @@ const NapkinCalculator = () => {
     }
     
     yPos += 45;
+    
+    // Project Costs Section
     doc.setTextColor(0); doc.setFontSize(12);
+    doc.text("Total Entry Fee (Cash to Close)", 20, yPos); yPos += 8;
+    doc.setFontSize(10);
+    doc.text(`Down Payment: $${(values.price - metrics.totalLoanAmount).toLocaleString()}`, 20, yPos);
+    doc.text(`Rehab Budget: $${values.rehab.toLocaleString()}`, 100, yPos);
+    doc.text(`Closing Costs: $${Math.round(values.price * (values.closingCosts/100)).toLocaleString()} (${values.closingCosts}%)`, 20, yPos+6);
+    doc.setFontSize(12); doc.setTextColor(200, 0, 0);
+    doc.text(`Total Cash Needed: $${metrics.totalEntryFee.toLocaleString()}`, 100, yPos+6);
+    yPos += 20;
+
+    // Debt
+    doc.setTextColor(0);
     doc.text("Capital Stack", 20, yPos); yPos += 10;
     doc.setFontSize(10);
-    loans.forEach(l => {
-        doc.text(`${l.name}: ${l.ltv}% LTV @ ${l.rate}% ${l.isIO ? '(IO)' : ''}`, 20, yPos);
-        yPos += 6;
-    });
+    loans.forEach(l => { doc.text(`${l.name}: ${l.ltv}% LTV @ ${l.rate}% ${l.isIO ? '(IO)' : ''}`, 20, yPos); yPos += 6; });
     doc.text(`Blended Rate: ${metrics.blendedRate}% | CLTV: ${metrics.cltv}%`, 20, yPos + 2);
     yPos += 10;
 
@@ -411,7 +334,6 @@ const NapkinCalculator = () => {
         doc.setTextColor(0);
         yPos += 25;
     }
-    
     doc.save(`${values.address.replace(/\s+/g, '_')}_EquiCheck.pdf`);
   };
 
@@ -419,62 +341,42 @@ const NapkinCalculator = () => {
     if (!values.address) { alert("Address required!"); return; }
     try {
         const finalPrice = calcMode === 'reverse' ? metrics.maxOffer : values.price;
-        await db.properties.add({
-            address: values.address, price: finalPrice, rent: values.rent, dscr: metrics.dscr,
-            images: images, notes: values.notes, fullData: values, loans: loans, created: new Date()
-        });
+        await db.properties.add({ address: values.address, price: finalPrice, rent: values.rent, dscr: metrics.dscr, images: images, notes: values.notes, fullData: values, loans: loans, created: new Date() });
         alert("Saved!");
     } catch (e) { console.error(e); }
   };
-
+  const handleBackup = async () => {
+    try { const d = await db.properties.toArray(); const b = new Blob([JSON.stringify(d)], {type: "application/json"}); const l = document.createElement('a'); l.href = URL.createObjectURL(b); l.download = `EquiCheck_Backup_${new Date().toISOString().slice(0,10)}.json`; l.click(); } catch (e) { alert("Backup failed: " + e.message); }
+  };
+  const handleRestore = async (e) => {
+    const f = e.target.files[0]; if (!f || !window.confirm("Overwrite current data?")) return; const r = new FileReader(); r.onload = async (ev) => { try { await db.properties.clear(); await db.properties.bulkAdd(JSON.parse(ev.target.result)); alert("Restored!"); } catch { alert("Invalid file."); } }; r.readAsText(f);
+  };
   const loadProperty = (prop) => {
     setValues({ ...prop.fullData, notes: prop.fullData.notes || '' });
-    if (prop.loans && prop.loans.length > 0) {
-        setLoans(prop.loans);
-    } else {
-        const oldLtv = 100 - (prop.fullData.downPaymentPercent || 20);
-        const oldRate = prop.fullData.interestRate || 7.5;
-        setLoans([{ id: 1, name: 'Senior Debt', ltv: oldLtv, rate: oldRate, isIO: false }]);
-    }
+    if (prop.loans && prop.loans.length > 0) setLoans(prop.loans);
+    else { const oldLtv = 100 - (prop.fullData.downPaymentPercent || 20); const oldRate = prop.fullData.interestRate || 7.5; setLoans([{ id: 1, name: 'Senior Debt', ltv: oldLtv, rate: oldRate, isIO: false }]); }
     setImages(prop.images || []); setCalcMode('standard'); setShowHistory(false);
   };
-
-  const getScoreColor = (dscr) => {
-    if (dscr >= 1.25) return 'text-green-400 border-green-400';
-    if (dscr >= 1.0) return 'text-yellow-400 border-yellow-400';
-    return 'text-red-500 border-red-500';
-  };
+  const getScoreColor = (dscr) => { if (dscr >= 1.25) return 'text-green-400 border-green-400'; if (dscr >= 1.0) return 'text-yellow-400 border-yellow-400'; return 'text-red-500 border-red-500'; };
 
   return (
     <div className="p-4 max-w-md mx-auto bg-gray-900 min-h-screen text-gray-100 font-mono flex flex-col relative">
       
-      {/* MODALS */}
+      {/* MODALS (Feedback & Settings) */}
       {showFeedback && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-            <div className="bg-gray-800 p-6 rounded-lg w-full max-w-sm border border-gray-600">
-                <h3 className="text-xl font-bold mb-4">Send Feedback</h3>
-                <textarea className="w-full bg-gray-900 border border-gray-700 rounded p-3 text-sm h-32 mb-4 focus:outline-none focus:border-blue-500" value={feedbackText} onChange={(e) => setFeedbackText(e.target.value)}/>
-                <div className="flex justify-end gap-3"><button onClick={() => setShowFeedback(false)} className="text-gray-400">Cancel</button><button onClick={handleSendFeedback} className="bg-blue-600 px-4 py-2 rounded">Send</button></div>
-            </div>
+            <div className="bg-gray-800 p-6 rounded-lg w-full max-w-sm border border-gray-600"><h3 className="text-xl font-bold mb-4">Send Feedback</h3><textarea className="w-full bg-gray-900 border border-gray-700 rounded p-3 text-sm h-32 mb-4" value={feedbackText} onChange={(e) => setFeedbackText(e.target.value)}/><div className="flex justify-end gap-3"><button onClick={() => setShowFeedback(false)} className="text-gray-400">Cancel</button><button onClick={handleSendFeedback} className="bg-blue-600 px-4 py-2 rounded">Send</button></div></div>
         </div>
       )}
       {showSettings && (
         <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-50 p-4">
-            <div className="bg-gray-800 p-6 rounded-lg w-full max-w-sm border border-gray-600 max-h-[80vh] overflow-y-auto">
-                <h3 className="text-xl font-bold mb-4">Global Defaults</h3>
+            <div className="bg-gray-800 p-6 rounded-lg w-full max-w-sm border border-gray-600 max-h-[80vh] overflow-y-auto"><h3 className="text-xl font-bold mb-4">Global Defaults</h3>
                 <div className="space-y-3 text-sm">
-                    <div className="bg-gray-900 p-2 rounded border border-blue-900/50">
-                        <label className="text-blue-400 font-bold mb-1 block">RentCast API Key</label>
-                        <input type="text" name="rentCastKey" value={defaults.rentCastKey} onChange={handleDefaultChange} placeholder="Paste key here..." className="w-full bg-gray-800 p-2 rounded border border-gray-700 text-xs"/>
-                        <a href="https://rentcast.io/api" target="_blank" rel="noreferrer" className="text-[10px] text-gray-400 underline mt-1 block">Get a free key here</a>
-                    </div>
+                    <div className="bg-gray-900 p-2 rounded border border-blue-900/50"><label className="text-blue-400 font-bold mb-1 block">RentCast API Key</label><input type="text" name="rentCastKey" value={defaults.rentCastKey} onChange={handleDefaultChange} placeholder="Paste key here..." className="w-full bg-gray-800 p-2 rounded border border-gray-700 text-xs"/><a href="https://rentcast.io/api" target="_blank" rel="noreferrer" className="text-[10px] text-gray-400 underline mt-1 block">Get a free key here</a></div>
+                    <div><label className="text-gray-400">Closing Costs %</label><input type="number" name="closingCosts" value={defaults.closingCosts} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
                     <div><label className="text-gray-400">Primary Rate (%)</label><input type="number" name="primaryRate" value={defaults.primaryRate} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
                     <div><label className="text-gray-400">Primary LTV %</label><input type="number" name="primaryLtv" value={defaults.primaryLtv} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
-                    <div className="pt-2 border-t border-gray-700 font-bold text-gray-500">CRE Defaults</div>
-                    <div><label className="text-gray-400">Expense Ratio (%)</label><input type="number" name="expenseRatio" value={defaults.expenseRatio} onChange={handleDefaultChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
-                </div>
-                <div className="flex justify-end gap-3 mt-6"><button onClick={() => setShowSettings(false)} className="text-gray-400">Cancel</button><button onClick={saveSettings} className="bg-blue-600 px-4 py-2 rounded font-bold">Save Defaults</button></div>
-            </div>
+                </div><div className="flex justify-end gap-3 mt-6"><button onClick={() => setShowSettings(false)} className="text-gray-400">Cancel</button><button onClick={saveSettings} className="bg-blue-600 px-4 py-2 rounded font-bold">Save Defaults</button></div></div>
         </div>
       )}
 
@@ -492,17 +394,13 @@ const NapkinCalculator = () => {
       <div className="flex-grow">
           {!showHistory ? (
             <>
+                {/* AUTOCOMPLETE DROPDOWN */}
                 <div className="flex gap-2 mb-4 relative">
-                     {/* AUTOCOMPLETE DROPDOWN */}
                      <div className="flex-grow relative">
-                         <input type="text" name="address" placeholder="Property Address" value={values.address} onChange={handleManualAddressChange} autoComplete="off" className="w-full bg-gray-800 border-b-2 border-gray-600 focus:border-blue-500 p-2 text-lg outline-none"/>
+                         <input type="text" name="address" placeholder="Property Address" value={values.address} onChange={(e) => {setValues({...values, address: e.target.value}); setShowDropdown(true);}} autoComplete="off" className="w-full bg-gray-800 border-b-2 border-gray-600 focus:border-blue-500 p-2 text-lg outline-none"/>
                          {suggestions.length > 0 && showDropdown && (
                              <ul className="absolute z-50 left-0 right-0 bg-gray-800 border border-gray-600 rounded-b shadow-xl max-h-48 overflow-y-auto">
-                                 {suggestions.map((s, i) => {
-                                     const p = s.properties;
-                                     const label = `${p.housenumber || ''} ${p.street || ''}, ${p.city || ''} ${p.state || ''}`;
-                                     return (<li key={i} onClick={() => handleAddressSelect(s)} className="p-3 border-b border-gray-700 hover:bg-gray-700 cursor-pointer text-sm"><div className="font-bold text-white">{p.name || (p.housenumber + ' ' + p.street)}</div><div className="text-gray-400 text-xs">{p.city}, {p.state} {p.postcode}</div></li>);
-                                 })}
+                                 {suggestions.map((s, i) => { const p = s.properties; return (<li key={i} onClick={() => handleAddressSelect(s)} className="p-3 border-b border-gray-700 hover:bg-gray-700 cursor-pointer text-sm"><div className="font-bold text-white">{p.name || (p.housenumber + ' ' + p.street)}</div><div className="text-gray-400 text-xs">{p.city}, {p.state} {p.postcode}</div></li>); })}
                              </ul>
                          )}
                          {isLoadingData && <div className="absolute right-2 top-3 text-blue-500 text-xs animate-pulse">Loading...</div>}
@@ -521,27 +419,13 @@ const NapkinCalculator = () => {
                 {/* SCORE GAUGE */}
                 <div className={`mb-6 p-4 border-2 rounded-xl text-center transition-colors ${getScoreColor(metrics.dscr)}`}>
                     {calcMode === 'cre' ? (
-                         <div className="flex justify-around items-center">
-                            <div><div className="text-4xl font-bold">{metrics.capRate}%</div><div className="text-xs uppercase">CAP RATE</div></div>
-                            <div className="text-left text-sm text-gray-300"><div>NOI: ${metrics.noi.toLocaleString()}</div><div>CoC: {metrics.coc}%</div></div>
-                        </div>
+                         <div className="flex justify-around items-center"><div><div className="text-4xl font-bold">{metrics.capRate}%</div><div className="text-xs uppercase">CAP RATE</div></div><div className="text-left text-sm text-gray-300"><div>NOI: ${metrics.noi.toLocaleString()}</div><div>CoC: {metrics.coc}%</div></div></div>
                     ) : calcMode === 'reverse' ? (
-                        <div className="flex flex-col items-center">
-                            <div className="text-xs uppercase tracking-widest mb-1">Max Allowable Offer</div>
-                            <div className="text-3xl font-bold text-white mb-2">${metrics.maxOffer.toLocaleString()}</div>
-                            <div className="text-xs text-gray-300">To hit {values.targetDscr} DSCR</div>
-                        </div>
+                        <div className="flex flex-col items-center"><div className="text-xs uppercase tracking-widest mb-1">Max Allowable Offer</div><div className="text-3xl font-bold text-white mb-2">${metrics.maxOffer.toLocaleString()}</div><div className="text-xs text-gray-300">To hit {values.targetDscr} DSCR</div></div>
                     ) : calcMode === 'refi' ? (
-                        <div className="flex flex-col items-center">
-                            <div className="text-xs uppercase tracking-widest mb-1">Est. Cash Out</div>
-                            <div className={`text-4xl font-bold mb-2 ${metrics.cashOut >= 0 ? 'text-green-400' : 'text-red-500'}`}>${metrics.cashOut.toLocaleString()}</div>
-                            <div className="text-xs text-gray-300">New DSCR: {metrics.dscr}</div>
-                        </div>
+                        <div className="flex flex-col items-center"><div className="text-xs uppercase tracking-widest mb-1">Est. Cash Out</div><div className={`text-4xl font-bold mb-2 ${metrics.cashOut >= 0 ? 'text-green-400' : 'text-red-500'}`}>${metrics.cashOut.toLocaleString()}</div><div className="text-xs text-gray-300">New DSCR: {metrics.dscr}</div></div>
                     ) : (
-                        <div className="flex justify-around items-center">
-                            <div><div className="text-4xl font-bold">{metrics.dscr}</div><div className="text-xs uppercase">DSCR</div></div>
-                            <div className="text-left text-sm text-gray-300"><div>Flow: ${metrics.cashFlow}</div><div>PITIA: ${metrics.pitia}</div></div>
-                        </div>
+                        <div className="flex justify-around items-center"><div><div className="text-4xl font-bold">{metrics.dscr}</div><div className="text-xs uppercase">DSCR</div></div><div className="text-left text-sm text-gray-300"><div>Flow: ${metrics.cashFlow}</div><div>PITIA: ${metrics.pitia}</div></div></div>
                     )}
                 </div>
 
@@ -570,6 +454,20 @@ const NapkinCalculator = () => {
                         )}
                     </div>
                     {calcMode === 'refi' && <div><label className="text-gray-500">Existing Debt</label><input type="number" name="existingDebt" value={values.existingDebt} onChange={handleChange} className="w-full bg-gray-800 p-2 rounded"/></div>}
+
+                    {/* PROJECT COSTS (NEW) */}
+                    {calcMode !== 'reverse' && (
+                    <div className="bg-gray-800 p-3 rounded-lg border border-yellow-900/50">
+                        <div className="flex justify-between items-center mb-2"><h3 className="text-xs font-bold uppercase text-yellow-500">Project Costs</h3><div className="text-[10px] text-gray-400">Total Entry Fee: <span className="text-white font-bold">${metrics.totalEntryFee.toLocaleString()}</span></div></div>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div><label className="text-gray-500 text-xs">Rehab Budget ($)</label><input type="number" name="rehab" value={values.rehab} onChange={handleChange} className="w-full bg-gray-900 p-2 rounded border border-gray-700"/></div>
+                            <div>
+                                <div className="flex justify-between text-xs text-gray-400 mb-1"><span>Closing Costs</span><span className="text-yellow-500">{values.closingCosts}%</span></div>
+                                <input type="range" name="closingCosts" min="0" max="10" step="0.5" value={values.closingCosts} onChange={handleChange} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
+                            </div>
+                        </div>
+                    </div>
+                    )}
 
                     {/* CRE EXPENSES */}
                     {calcMode === 'cre' && (
